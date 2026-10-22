@@ -1,13 +1,16 @@
 """Run automatic court detection on many frames and measure accuracy and robustness.
 
-Usage:
+Usage (recommended): per-frame ground truth from annotate_court.py
+    python scripts/court_batch_eval.py frames/volleyballmatch \
+        --gt-json data/annotations/volleyballmatch_gt.json
+
+Usage (single click set, only valid if the camera never zooms or moves):
     python scripts/court_batch_eval.py frames/volleyballmatch \
         --gt data/annotations/volleyballmatch_frame_000300_clicks.npy --gt-points near-half
 
-Because the camera is fixed, one set of hand-clicked points is ground truth for
-every frame that shows the standard view. Frames from replays, close-ups or
-camera cuts don't show the court in that position; the quality checks below
-should reject them, and the report counts how often they don't.
+Detection and quality checks run on every frame; error is measured only on
+frames that have ground truth. With --gt-json the error is reported separately
+for the corners and for the attack-line points, which the detector never uses.
 
 Quality checks (a frame is "accepted" only if all pass):
     - every edge has at least MIN_POINTS scan points and MIN_INLIER_FRAC RANSAC inliers
@@ -24,6 +27,7 @@ Outputs in results/court_batch/<folder name>/:
 """
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -90,7 +94,8 @@ def montage(images, cols=3, width=640):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("folder", help="folder of frames from inspect_video.py")
-    parser.add_argument("--gt", help="clicks .npy from manual_homography.py")
+    parser.add_argument("--gt-json", help="per-frame ground truth from annotate_court.py")
+    parser.add_argument("--gt", help="single clicks .npy from manual_homography.py")
     parser.add_argument("--gt-points", choices=GT_POINT_SETS, default="near-half")
     parser.add_argument("--out", default="results/court_batch")
     args = parser.parse_args()
@@ -101,8 +106,22 @@ def main():
         raise SystemExit(f"No frame_*.jpg files in {args.folder}")
     out_dir = Path(args.out) / Path(args.folder).name
     out_dir.mkdir(parents=True, exist_ok=True)
-    gt = np.load(args.gt) if args.gt else None
-    gt_court = GT_POINT_SETS[args.gt_points]
+    if args.gt_json:
+        gtj = json.loads(Path(args.gt_json).read_text())
+        gt_court = np.float32(gtj["court_points"])
+        gt_frames = {k: np.float32(v) for k, v in gtj["frames"].items()}
+        gt_for = lambda name: gt_frames.get(name)
+        independent = np.array([p[1] not in (0, 18) for p in gtj["court_points"]])
+    elif args.gt:
+        gt_court = GT_POINT_SETS[args.gt_points]
+        single = np.load(args.gt)
+        gt_for = lambda name: single
+        independent = None
+    else:
+        gt_for = lambda name: None
+        independent = None
+    has_gt = bool(args.gt_json or args.gt)
+    corner_err, indep_err = [], []
 
     rows, accepted_err, rejected_imgs, accepted = [], [], [], []
     for i, path in enumerate(frames, 1):
@@ -120,17 +139,22 @@ def main():
         ok, reason, fracs = quality_check(img, corners, scans, lines)
         row.update({f"inliers_{k}": f"{v:.2f}" for k, v in fracs.items()})
         row.update({f"c{j}_{ax}": f"{corners[j][a]:.1f}" for j in range(4) for a, ax in enumerate("xy")})
+        gt = gt_for(path.name)
         if gt is not None:
             err_px, err_m = compare_to_gt(H, gt, gt_court)
             row.update(mean_err_px=f"{err_px.mean():.2f}", mean_err_cm=f"{err_m.mean() * 100:.2f}",
                        max_err_cm=f"{err_m.max() * 100:.2f}")
+            if independent is not None and ok:
+                corner_err.extend(err_m[~independent] * 100)
+                indep_err.extend(err_m[independent] * 100)
         row["status"] = "accepted" if ok else "rejected"
         row["reason"] = reason
         rows.append(row)
 
         if ok:
-            err_cm = err_m.mean() * 100 if gt is not None else 0.0
-            accepted_err.append(err_cm)
+            err_cm = err_m.mean() * 100 if gt is not None else -1.0
+            if gt is not None:
+                accepted_err.append(err_cm)
             accepted.append((err_cm, path, img, H))
         else:
             rejected_imgs.append((path, img, reason))
@@ -155,12 +179,12 @@ def main():
         f"Rejected: {n_rej} ({n_rej / n:.0%})  (quality checks failed)",
         f"Failed:   {n_fail} ({n_fail / n:.0%})  (detector could not run)",
     ]
-    if gt is not None and accepted_err:
+    if has_gt and accepted_err:
         e = np.array(accepted_err)
         good = e <= GOOD_CM
         lines_out += [
             "",
-            "Error against hand-clicked ground truth, accepted frames (cm on court):",
+            f"Error against hand-clicked ground truth, {len(e)} accepted frames with GT (cm on court):",
             f"  median {np.median(e):.1f}   mean {e.mean():.1f}   "
             f"90th pct {np.percentile(e, 90):.1f}   max {e.max():.1f}",
             f"  within {GOOD_CM:.0f} cm: {good.sum()}/{len(e)}",
@@ -169,6 +193,14 @@ def main():
             "",
             f"Mean error on good frames only: {e[good].mean():.1f} cm" if good.any() else "",
         ]
+        if indep_err:
+            ce, ie = np.array(corner_err), np.array(indep_err)
+            lines_out += [
+                "",
+                "Per point type (accepted frames):",
+                f"  corners (used by the detector):        median {np.median(ce):.1f}  mean {ce.mean():.1f} cm",
+                f"  attack-line points (never used):       median {np.median(ie):.1f}  mean {ie.mean():.1f} cm",
+            ]
     reasons = {}
     for r in rows:
         if r["status"] != "accepted":
@@ -181,16 +213,17 @@ def main():
     print("\n" + summary)
 
     # ---- Error plot ----
-    if gt is not None:
+    if has_gt:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         idx = np.arange(n)
         err = np.array([float(r.get("mean_err_cm", "nan") or "nan") for r in rows])
-        acc = np.array([r["status"] == "accepted" for r in rows])
+        acc = np.array([r["status"] == "accepted" for r in rows]) & ~np.isnan(err)
         fig, ax = plt.subplots(figsize=(10, 3.5))
         ax.scatter(idx[acc], err[acc], s=14, label="accepted")
-        ax.scatter(idx[~acc], np.full((~acc).sum(), 0), s=14, marker="x", color="grey",
+        rej = np.array([r["status"] != "accepted" for r in rows])
+        ax.scatter(idx[rej], np.full(rej.sum(), 0), s=14, marker="x", color="grey",
                    label="rejected / failed")
         ax.axhline(GOOD_CM, ls="--", lw=1, color="red", label=f"{GOOD_CM:.0f} cm")
         ax.set_yscale("symlog", linthresh=10)
@@ -202,7 +235,8 @@ def main():
 
     # ---- Image sheets ----
     accepted.sort(key=lambda t: -t[0])
-    worst = [draw_overlay(img, H, f"{p.stem}  {e:.1f} cm") for e, p, img, H in accepted[:6]]
+    worst = [draw_overlay(img, H, f"{p.stem}  {e:.1f} cm" if e >= 0 else p.stem)
+             for e, p, img, H in accepted[:6]]
     sheet = montage(worst)
     if sheet is not None:
         cv2.imwrite(str(out_dir / "worst.jpg"), sheet)
