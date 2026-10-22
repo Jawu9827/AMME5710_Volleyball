@@ -220,5 +220,36 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-# Video files
+# ---------------------------------------------------------------
+# Project-specific (AMME5710 Volleyball)
+# ---------------------------------------------------------------
+
+# Data: ignore everything in data/ except annotations (small ground-truth files)
+data/*
+!data/annotations/
+
+# Extracted frames and debug images from the scripts
+frames/
+results/
+
+# Video files (both cases, for Mac/Linux teammates)
 *.mp4
+*.MP4
+*.mov
+*.MOV
+*.avi
+*.mkv
+
+# Script outputs written next to videos
+*_candidates.csv
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.weights
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
