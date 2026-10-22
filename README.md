@@ -9,11 +9,11 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 
 | Component | Status |
 |---|---|
-| Court detection and homography (single camera) | ✅ Done: 5.8 cm mean error, runs live |
-| Ball candidate detection | 🟡 Starter script only (`ball_motion.py`) |
-| Ball tracking and bounce detection | ⬜ Not started |
-| Two-camera sync and 3D triangulation | ⬜ Not started |
-| In/out calls | ⬜ Not started |
+| Court detection and homography (single camera) | Done: 5.8 cm mean error, runs live |
+| Ball candidate detection | Not started |
+| Ball tracking and bounce detection | Not started |
+| Two-camera sync and 3D triangulation | Not started |
+| In/out calls | Not started |
 
 ---
 
