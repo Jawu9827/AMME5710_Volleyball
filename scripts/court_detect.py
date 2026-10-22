@@ -87,16 +87,20 @@ def ransac_line(pts, tol, iters=RANSAC_ITERS, seed=0):
     """Fit a 2D line to points with RANSAC. Returns (point, unit direction, inlier mask)."""
     rng = np.random.default_rng(seed)
     pts = np.asarray(pts, np.float64)
-    best = None
-    for _ in range(iters):
-        a, b = pts[rng.choice(len(pts), 2, replace=False)]
-        d = b - a
-        if np.hypot(*d) < 1e-6:
-            continue
-        n = np.array([-d[1], d[0]]) / np.hypot(*d)
-        inl = np.abs((pts - a) @ n) < tol
-        if best is None or inl.sum() > best.sum():
-            best = inl
+    if len(pts) < 2:
+        raise ValueError(f"only {len(pts)} boundary points found")
+    # All hypotheses at once: each row is a line through two random points.
+    i = rng.integers(0, len(pts), size=(iters, 2))
+    i = i[i[:, 0] != i[:, 1]]
+    a, b = pts[i[:, 0]], pts[i[:, 1]]
+    d = b - a
+    length = np.hypot(d[:, 0], d[:, 1])
+    keep = length > 1e-6
+    a, d, length = a[keep], d[keep], length[keep]
+    n = np.stack([-d[:, 1], d[:, 0]], axis=1) / length[:, None]          # unit normals
+    dist = np.abs((pts[None, :, :] - a[:, None, :]) @ n[:, :, None])[..., 0]  # (hyp, pts)
+    inliers = dist < tol
+    best = inliers[np.argmax(inliers.sum(axis=1))]
     # Least-squares refit on inliers (total least squares via SVD)
     p = pts[best]
     c = p.mean(axis=0)
