@@ -1,7 +1,7 @@
 # AMME5710 Volleyball Line Judge
 
-A low-cost computer vision line judge for amateur indoor volleyball: phones on tripods
-courtside, no calibration target, automatic in/out calls.
+A low-cost computer vision line judge for amateur indoor volleyball: two phones on tripods
+behind the end lines, no calibration target, automatic in/out calls.
 
 AMME5710 Computer Vision and Image Processing, Major Project 2026, University of Sydney.
 
@@ -9,11 +9,14 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 
 | Component | Status |
 |---|---|
-| Court detection and homography (single camera) | Done: 5.8 cm mean error, runs live |
-| Ball candidate detection | Not started |
-| Ball tracking and bounce detection | Not started |
-| Two-camera sync and 3D triangulation | Not started |
-| In/out calls | Not started |
+| Court detection on broadcast footage (free-zone boundary) | Done: 5.8 cm mean error, runs live |
+| Game 2 footage: HDR to SDR conversion | Done |
+| Game 2: automatic yellow-line detection | Done (both cameras) |
+| Game 2: camera calibration | Done: camera A 6.3 cm, camera B 2.8 cm (held-out line error) |
+| Game 2: audio sync between cameras | Done: offset +9.71 s, 6/8 chunks agree |
+| Game 2: synced two-camera court view | Done |
+| Ball tracking | On the `Ball-Detection-+-Tracking` branch, not merged yet |
+| Bounce detection and in/out calls | Not started |
 
 ---
 
@@ -38,157 +41,220 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Check it works:
-```
-python -c "import cv2, numpy, matplotlib; print('OpenCV', cv2.__version__)"
-```
+`requirements.txt` must include `opencv-python`, `numpy`, `scipy`, `matplotlib` and
+`imageio-ffmpeg`. The last one provides ffmpeg (with the `zscale` filter needed for HDR
+conversion), so ffmpeg does not need to be installed separately.
 
 Run all commands from the repo root with the environment activated.
 
 ## Data
 
 Videos are **not** in Git: they're too large, and GitHub rejects files over 100 MB.
-Put video files in `data/`, for example `data/volleyballmatch.mp4`.
 
 | Folder | In Git? | Contents |
 |---|---|---|
-| `data/` | No | Raw videos |
-| `data/annotations/` | **Yes** | Hand-clicked ground truth (small JSON / `.npy` files) |
-| `frames/` | No | Frames extracted by `inspect_video.py`, plus debug images |
-| `results/` | No | Evaluation outputs, saved videos, screenshots |
+| `data/` | No | Videos, e.g. `data/game2_A.mp4`, `data/game2_B_sdr.mp4` |
+| `data/annotations/` | **Yes** | Calibrations, sync offsets, hand-clicked ground truth (small JSON files) |
+| `frames/` | No | Frames saved by `inspect_video.py` |
+| `results/` | No | Debug images, overlays, combined and synced videos |
 
-Development footage so far: a broadcast match (USA vs Brazil) filmed from a raised position
-behind one end line. The camera holds still during rallies but **zooms and reframes between rallies**.
+### Game 2 footage (current)
+
+Two iPhones on tripods, one behind each end line of an indoor court with **yellow
+volleyball lines on a blue floor**, recorded at 1920x1080, about 29.97 fps.
+
+| Camera | File | Position (`--end`) | Notes |
+|---|---|---|---|
+| A | `data/game2_A.mp4` | behind the y = 18 end line (`near`) | normal (SDR) video |
+| B | `data/game2_B_sdr.mp4` | behind the y = 0 end line (`far`) | recorded in HDR; converted with `hdr_to_sdr.py` |
+
+Court frame (metres), shared by both cameras: `x` 0–9 across the width, `y` 0–18 along the
+length. Far end line `y = 0`, far attack line `y = 6`, centre line (net) `y = 9`,
+near attack line `y = 12`, near end line `y = 18`. Each camera judges the half nearest to
+it: camera A `y = 9..18`, camera B `y = 0..9`.
+
+For future recordings: turn **HDR Video off** on both phones
+(Settings > Camera > Record Video), and record a clap at the start of filming.
 
 ---
 
-## Court detection
+## Two-camera pipeline (Game 2)
 
-### How it works (`scripts/court_detect.py`)
+### 1. Inspect each video
+```
+python scripts/inspect_video.py data/game2_A.mp4 --every 30
+```
+Prints resolution, frame rate, bitrate and codec, checks for dropped or doubled frames, and
+flags HDR video. Saves exact frames (PNG, via ffmpeg) and a `contact_sheet.jpg` to
+`frames/game2_A/`. Use `--times 12.5 60` for specific times.
 
-White court lines on a light floor are almost invisible (roughly 245 vs 241 brightness),
-so detecting the lines directly doesn't work (see `court_lines.py`, kept as the failed
-baseline). Instead the detector uses the strong colour boundary between the court and
-the free zone around it. Lines count as part of the court, so that boundary is the court edge.
+### 2. Convert HDR video to normal colours
+```
+python scripts/hdr_to_sdr.py data/IMG_4857.MOV data/game2_B_sdr.mp4 --width 1920
+```
+iPhone HDR (HLG, BT.2020) looks washed out when read as normal video: our floor saturation
+dropped from about 65 to 22. The script converts properly: HLG to linear light (reference
+white 203 nits, ITU-R BT.2408), BT.2020 to BT.709 primaries, Mobius tone mapping, H.264
+CRF 18, audio copied. A round-trip check (SDR to HLG and back) recovered the floor colour to
+within 2 saturation levels, with a mean pixel difference of 3/255 (13/255 when read naively).
 
-1. **Free-zone colour model.** Sample the floor colour in a strip at the bottom of the
-   frame, just outside the near end line, and mark every pixel with that hue (HSV hue
-   distance plus saturation/value thresholds), then clean the mask with a morphological
-   opening. The colour isn't hard-coded, so other free-zone colours should work.
-2. **Boundary scanning.** Walk along columns and rows from inside the court until a run of
-   free-zone pixels is reached, collecting candidate points on the near end line, far end
-   line and both sidelines.
-3. **RANSAC line fitting** for each edge (vectorised), with a total-least-squares refit on
-   the inliers. Players standing on or over lines become outliers.
-4. **Homography.** Intersect the four lines to get four corners, then map them to the
-   9 m × 18 m court model with `cv2.getPerspectiveTransform`.
-5. **Independent check.** The centre line and attack lines are never used in the fit;
-   they're projected back into the image to check the homography.
+- Use the original `.MOV` from the phone (10-bit) if possible.
+- `--width 1920` keeps a 4K original the same size as the other camera.
+- `--white 350` gives a darker result (camera B came out about 30% brighter than A at 203).
+- Test first with `--start 60 --duration 10`; it saves a before/after `_compare.jpg`.
 
-Court frame (metres): `x` across the 9 m width, `y` along the 18 m length.
-Far end line `y = 0`, far attack line `y = 6`, centre line `y = 9`,
-near attack line `y = 12`, near end line `y = 18`.
+### 3. Detect the yellow court lines automatically
+```
+python scripts/detect_court_lines.py data/game2_A.mp4 --time 60
+```
+1. **Colour model:** the floor colour is measured at the bottom centre of the frame, and
+   saturation/brightness thresholds are set relative to it, so the same code works on normal
+   and converted HDR footage. Yellow is hue 22–42, which excludes the orange lines of other
+   sports (hue 9–20).
+2. **Floor mask:** pixels near the floor's hue. Thin lines from other sports are bridged by a
+   morphological closing first, then every large floor region is kept.
+3. **Line mask:** yellow pixels on the floor; compact blobs (skin, shoes) are removed by shape.
+4. **Hough transform** gives segments, grouped by angle into the near end line, left
+   sideline and right sideline.
+5. **RANSAC line fit** for each group (players on the line are outliers), least-squares
+   refit on the inliers, and the near corners as line intersections.
 
-### Results
+Saves `results/court_lines/<video>_t60.json` (lines, corners, and sample points taken from
+the actual line pixels) and `_debug.jpg` (mask and segments above, fitted lines below).
+On our footage the detected line pixels lie within about 1–2 px of straight lines.
 
-Evaluated on 213 frames sampled every 10 s through a full match, against hand-clicked
-ground truth on 15 randomly chosen frames covering different zoom levels:
+### 4. Calibrate each camera
+```
+python scripts/calibrate_camera.py data/game2_A.mp4 --camera A --end near --time 60 --auto-lines results/court_lines/game2_A_t60.json
+python scripts/calibrate_camera.py data/game2_B_sdr.mp4 --camera B --end far --time 24 --auto-lines results/court_lines/game2_B_sdr_t24.json
+```
+The detected lines and corners are added automatically. You then click intersections the
+detector can't find, such as the attack-line ends and the far court. Names are always from
+the camera's own point of view ("near-left" = nearest corner on its left), and `--end` maps
+them into the shared court frame.
+
+- **Clicking:** a 5x magnifier follows the mouse. `i/j/k/l` nudge the last click 1 px,
+  `s` skips a point, `u` undoes, `Enter` moves to the next stage. In the second stage you can
+  click extra points along any line (`n` next line, `b` back, `Enter` finish).
+- **Fit:** a homography (court to image) by robust least squares on the pixel distances of
+  the intersections and of the line points from their lines, plus an optional radial lens
+  distortion term `k1`. That term is kept only if it reduces the held-out error.
+- **Accuracy estimate:** each line is left out of the fit in turn, and its points are checked
+  against where the line really is, in centimetres on the court. This is conservative: in
+  simulation it was about twice the true error.
+- **Tripod check:** 40 frames across the video are compared with the calibration frame by
+  phase correlation of the walls and ceiling. A shift over 2 px means the phone moved.
+- **Refit without re-clicking:** `--points-json data/annotations/calib_B.json`. Leave a bad
+  click out with `--drop "centre line / right sideline (under net)"`.
+
+Outputs: `data/annotations/calib_<camera>.json` (commit this), and in `results/calib/` the
+`_overlay.jpg` (court drawn on the calibration frame) and `_check.jpg` (court on frames
+through the video). Other scripts load a calibration with:
+```python
+from calibrate_camera import load_calibration
+cal = load_calibration("data/annotations/calib_A.json")
+court_xy = cal.image_to_court([[u, v]])      # pixels -> metres, for points on the floor
+```
+
+**Results (Game 2):**
+
+| | Accuracy estimate | Lens correction k1 | Tripod |
+|---|---|---|---|
+| Camera A | 6.3 cm | -0.021 | stable for the whole video |
+| Camera B | 2.8 cm | -0.012 | stable from about 7 s onwards |
+
+The centre line is too dark to click reliably near the right-hand net post in both views,
+so that point is left out with `--drop`. Far-court points have large errors in centimetres
+(one pixel covers 15–20 cm beyond the net), which doesn't matter because the other camera
+judges that half.
+
+### 5. Sync the two cameras
+```
+python scripts/sync_videos.py data/game2_A.mp4 data/game2_B_sdr.mp4
+```
+Both phones recorded the same whistles and ball contacts. Each soundtrack becomes a
+multi-band onset signal (rises in log energy in five frequency bands), and the two are
+cross-correlated, coarse to fine:
+1. Blurred signals at 100 Hz, so sounds reaching the phones up to about 60 ms apart (20 m
+   at 343 m/s) still line up.
+2. Refined at 1 ms within ±0.15 s of that answer.
+
+Each correlation is scored as a z-score per lag, which treats short and long overlaps fairly.
+Every 30 s chunk of A votes independently for an offset. The result is "reliable" if most
+chunks agree; otherwise it falls back to the whole-recording match ("PROBABLE") if that peak
+is clear.
+
+Outputs: `data/annotations/sync_<A>_<B>.json` (offset, `t_B = t_A + offset_s`),
+`results/sync/..._audio_diag.png` (correlation curve and chunk votes), and a side-by-side
+`_preview.mp4`.
+
+If it's unreliable: `--guess <seconds> --search 2` narrows the search, and
+`--offset <seconds>` sets the offset by hand.
+
+**Result (Game 2):** offset +9.71 s (camera B started about 9.7 s before camera A), with 6
+of 8 chunks agreeing and one clear correlation peak. Sound travel between the phones limits
+the accuracy to about ±1–2 frames, so confirm it on a serve contact.
+
+### 6. Synced views
+Side by side, with no overlays:
+```
+python scripts/combine_videos.py data/game2_A.mp4 data/game2_B_sdr.mp4 --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 0 --duration 3:00
+```
+Courts drawn on both cameras, each camera's half shaded, a top-down court map, and a
+once-per-second tripod check:
+```
+python scripts/court_view_synced.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 60
+```
+Add `--show` to watch while it renders. Outputs go to `results/combined/` and `results/synced/`.
+
+### Utility: click and plot points
+```
+python scripts/pick_points.py data/game2_A.mp4 --time 60 --names ball landing
+python scripts/pick_points.py frames/game2_A/t0120.00.png --show results/points/game2_A_t60.json
+```
+Saves pixel coordinates to `results/points/<name>.json` with an annotated image, or redraws
+saved points on another frame. Use it to hand-label ball landing spots as ground truth.
+
+---
+
+## Earlier work: court detection on broadcast footage
+
+Development footage: a broadcast match (USA vs Brazil) filmed from behind one end line. The
+camera holds still during rallies but zooms and reframes between rallies.
+
+White lines on that light floor are nearly invisible (brightness 245 vs 241), so
+`court_detect.py` uses the colour boundary between the court and the blue free zone:
+1. A free-zone colour model, sampled at the bottom of the frame.
+2. Boundary scanning along rows and columns.
+3. Vectorised RANSAC line fits for the four edges.
+4. Corners from line intersections, then a homography to the 9 x 18 m court.
+5. The centre and attack lines, never used in the fit, as an independent check.
+
+**Results:** 213 frames across a full match; 15 randomly chosen frames hand-labelled across
+different zoom levels.
 
 | Points | Median error | Mean error |
 |---|---|---|
 | All 6 points | 5.8 cm | 5.8 cm |
 | Corners (used by the detector) | 4.7 cm | 6.0 cm |
-| Attack-line points (**never used** by the detector) | 4.9 cm | 5.4 cm |
+| Attack-line points (never used by the detector) | 4.9 cm | 5.4 cm |
 
-- All 15 frames are within 15 cm; the worst is 8.0 cm.
-- Speed: about 11–15 ms per frame when detecting at 960 px width, so it keeps up with 30 fps video.
+It runs at about 11–15 ms per frame at 960 px width.
 
-**Known limitations**
-- Tested on one video at one venue so far.
-- Relies on the free zone being a different colour from the court.
-- The quality checks have not yet rejected any frames, because this video has no replays or
-  close-ups, so rejection is untested.
-
-### Scripts and how to run them
-
-**1. Inspect a video and extract frames**
-```
-python scripts/inspect_video.py data/volleyballmatch.mp4 --every 10
-```
-Prints resolution, fps and duration, and saves one frame every 10 s to `frames/volleyballmatch/`.
-
-**2. Detect the court in one frame**
-```
-python scripts/court_detect.py frames/volleyballmatch/frame_000300.jpg
-```
-Saves `_auto_H.npy` (image → court metres), `_auto_corners.npy`, `_auto_overlay.jpg` and
-`_auto_debug.jpg`. The debug image has four panels: free-zone mask, scanned points
-(coloured = kept, red = rejected by RANSAC), fitted court, and the original frame.
-
-Add `--gt <clicks.npy>` to compare with hand-clicked points from `manual_homography.py`.
-
-**3. Run live on a video or camera**
-```
-python scripts/court_live.py data/volleyballmatch.mp4
-python scripts/court_live.py data/volleyballmatch.mp4 --start 300 --save results/court_live.mp4
-python scripts/court_live.py 0          # camera index 0
-```
-Keys: `space` pause, `s` screenshot (saved to `results/screenshots/`), `q` quit.
-
-- Status shows **TRACKING**, **HOLD** (detection failed; the last good court is kept for
-  0.5 s) or **NO COURT**.
-- Corners are smoothed over time while the camera is still. A large jump, such as a zoom
-  or a cut, snaps straight to the new position instead.
-- Options: `--detect-width` (default 960), `--smooth` (default 0.3; 1 = no smoothing),
-  `--display-width`, `--no-display`, `--max-frames`.
-
-**4. Hand-click ground truth on random frames**
-```
-python scripts/annotate_court.py frames/volleyballmatch --n 15
-```
-Click six points per frame, in the order shown on screen:
-1. far-left corner
-2. far-right corner
-3. near-right corner
-4. near-left corner
-5. near attack line meets the left sideline
-6. near attack line meets the right sideline
-
-Keys: `Enter` accept, `r` redo, `s` skip, `q` save and quit. It saves after every frame and
-resumes where you left off. Output: `data/annotations/volleyballmatch_gt.json`.
-
-**5. Evaluate on many frames**
-```
-python scripts/court_batch_eval.py frames/volleyballmatch --gt-json data/annotations/volleyballmatch_gt.json
-```
-Outputs go to `results/court_batch/volleyballmatch/`:
-- `summary.txt`: accepted / rejected counts, error statistics, per-point-type errors
-- `per_frame.csv`: status, corners, inlier fractions and error for each frame
-- `error_plot.png`: error through the match
-- `worst.jpg`: overlays of the highest-error frames
-- `rejected.jpg`: sample of rejected frames
-
-A frame is accepted only if every edge has enough RANSAC inliers, the corners form a
-convex shape, the near edge is wider than the far edge, and all corners are inside the image.
-
-**6. Manual homography (single frame)**
-```
-python scripts/manual_homography.py frames/volleyballmatch/frame_000300.jpg
-```
-Click four points and get a homography plus an overlay to check it.
-- `--points near-half` (default): near attack line left and right, then near-right and near-left corners.
-- `--points full`: the four outer corners.
-
-### Other scripts
+**Limitations:** tested at one venue only, and it needs a free zone of a different colour
+from the court, which is why Game 2 uses line detection instead.
 
 | Script | Purpose |
 |---|---|
-| `court_lines.py` | First attempt: white-line mask + Canny + Hough. Fails on light courts; kept as a baseline for the report. |
-| `ball_motion.py` | Starter ball candidates: MOG2 background subtraction + size / circularity filter. Writes an annotated video and a CSV of candidates. |
+| `court_detect.py` | Free-zone boundary detector, one image: `python scripts/court_detect.py <image> [--gt clicks.npy]` |
+| `court_live.py` | Live court detection on a video or camera, with smoothing and HOLD / NO COURT states |
+| `annotate_court.py` | Hand-click 6 ground-truth points on random frames |
+| `court_batch_eval.py` | Run the detector on a folder of frames and measure the error against ground truth |
+| `manual_homography.py` | Four-click homography with an overlay check |
+| `court_lines.py` | First attempt (white-line mask, Canny, Hough); fails on light courts, kept as a baseline |
 
-```
-python scripts/ball_motion.py data/volleyballmatch.mp4 --start 30 --duration 15
-```
+`annotate_court.py` and `court_batch_eval.py` expect frames named `frame_XXXXXX.jpg`, from
+the earlier version of `inspect_video.py`. The current version names frames `tSSSS.SS.png`.
 
 ---
 
@@ -198,15 +264,15 @@ python scripts/ball_motion.py data/volleyballmatch.mp4 --start 30 --duration 15
   ```
   git checkout main
   git pull
-  git checkout -b ball-tracking
+  git checkout -b my-feature
   ```
 - Push your branch, open a pull request on GitHub, and merge when it works.
 - Before committing, run `git status` and make sure no videos, frames or results are listed.
 
 ## Next steps
 
-1. Ball detection and tracking: reduce false positives from `ball_motion.py` and link detections into trajectories.
-2. Bounce detection: find the frame and pixel where the ball hits the floor.
-3. Map the bounce through the court homography and call it in or out.
-4. Record our own two-phone footage with taped ground-truth marks.
-5. Two-camera sync and triangulation.
+1. Merge the ball tracker from `Ball-Detection-+-Tracking` and run it on both Game 2 videos.
+2. Bounce detection: the frame where the ball's vertical image motion reverses at the floor.
+3. Map the bottom of the ball at the bounce through that camera's calibration into court
+   coordinates, and call it in or out (line contact counts as in).
+4. Hand-label landing spots with `pick_points.py` to measure call accuracy.
