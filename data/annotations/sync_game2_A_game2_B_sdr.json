@@ -1,0 +1,65 @@
+{
+ "video_a": "game2_A.mp4",
+ "video_b": "game2_B_sdr.mp4",
+ "fps_a": 29.971018273681423,
+ "fps_b": 59.91424754882153,
+ "convention": "t_B = t_A + offset_s; frame_B = round((frame_A / fps_A + offset_s) * fps_B)",
+ "offset_s": 9.70453505558605,
+ "method": "audio",
+ "reliable": true,
+ "audio": {
+  "global_offset_s": 9.7059131786522,
+  "global_confidence": 1.4503456993118107,
+  "chunks": [
+   {
+    "start_s": 0.0,
+    "offset_s": 9.716936746813415,
+    "confidence": 1.401014389983566
+   },
+   {
+    "start_s": 30.0,
+    "offset_s": 78.26516544397815,
+    "confidence": 1.250308180024161
+   },
+   {
+    "start_s": 60.0,
+    "offset_s": 9.722165112115988,
+    "confidence": 1.0926956184995367
+   },
+   {
+    "start_s": 90.0,
+    "offset_s": 9.655011620116923,
+    "confidence": 1.1541237830873297
+   },
+   {
+    "start_s": 120.0,
+    "offset_s": 9.709275044058813,
+    "confidence": 1.43147374290143
+   },
+   {
+    "start_s": 150.0,
+    "offset_s": 9.719996678126648,
+    "confidence": 1.217969665802203
+   },
+   {
+    "start_s": 180.0,
+    "offset_s": -175.92797883229852,
+    "confidence": 1.150670102112334
+   },
+   {
+    "start_s": 210.0,
+    "offset_s": 9.724022615852391,
+    "confidence": 1.1897790493051357
+   }
+  ],
+  "n_chunks": 8,
+  "n_agree": 6,
+  "offset_s": 9.70453505558605,
+  "reliable": true,
+  "agree_spread_ms": 69.01099573546787,
+  "drift_ms_per_min": 3.300312042262096,
+  "basis": "chunk votes",
+  "coarse_offset_s": 9.718466712470033,
+  "fine_confidence": 5.322376672066689
+ }
+}
