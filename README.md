@@ -15,6 +15,7 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 | Game 2: camera calibration | Done: camera A 6.3 cm, camera B 2.8 cm (held-out line error) |
 | Game 2: audio sync between cameras | Done: offset +9.71 s, 6/8 chunks agree |
 | Game 2: synced two-camera court view | Done |
+| Player detection and top-down court map | Done: YOLO11n, F1 0.93, median position error 0.25 m |
 | Ball tracking | On the `Ball-Detection-+-Tracking` branch, not merged yet |
 | Bounce detection and in/out calls | Not started |
 
@@ -41,9 +42,16 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` must include `opencv-python`, `numpy`, `scipy`, `matplotlib` and
-`imageio-ffmpeg`. The last one provides ffmpeg (with the `zscale` filter needed for HDR
-conversion), so ffmpeg does not need to be installed separately.
+`requirements.txt` must include `opencv-contrib-python`, `numpy`, `scipy`, `matplotlib`,
+`imageio-ffmpeg` and `ultralytics`.
+- `imageio-ffmpeg` provides ffmpeg (with the `zscale` filter needed for HDR conversion), so
+  ffmpeg does not need to be installed separately.
+- `ultralytics` provides YOLO for player detection. It installs PyTorch (large; the CPU
+  version is fine). Model weights (`yolo11n.pt`, `yolo11s.pt`) download automatically on
+  first use and are ignored by Git (`*.pt`).
+- Use `opencv-contrib-python`, not `opencv-python`: OpenCV 5 moved the HOG people detector
+  to the contrib package. Don't install both (they share files). If you already have
+  `opencv-python`: `pip uninstall -y opencv-python`, then `pip install -r requirements.txt`.
 
 Run all commands from the repo root with the environment activated.
 
@@ -54,9 +62,9 @@ Videos are **not** in Git: they're too large, and GitHub rejects files over 100 
 | Folder | In Git? | Contents |
 |---|---|---|
 | `data/` | No | Videos, e.g. `data/game2_A.mp4`, `data/game2_B_sdr.mp4` |
-| `data/annotations/` | **Yes** | Calibrations, sync offsets, hand-clicked ground truth (small JSON files) |
+| `data/annotations/` | **Yes** | Calibrations, sync offsets, hand-clicked ground truth, fitted foot offset (small JSON files) |
 | `frames/` | No | Frames saved by `inspect_video.py` |
-| `results/` | No | Debug images, overlays, combined and synced videos |
+| `results/` | No | Debug images, overlays, combined, synced and player videos, evaluation output |
 
 ### Game 2 footage (current)
 
@@ -206,6 +214,92 @@ once-per-second tripod check:
 python scripts/court_view_synced.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 60
 ```
 Add `--show` to watch while it renders. Outputs go to `results/combined/` and `results/synced/`.
+
+### 7. Player detection and court positions
+```
+python scripts/players_on_court.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 30
+```
+Both synced camera views with player boxes, plus a top-down court map with a dot and a short
+trail for each player, coloured by side of the net (orange = camera A's side, green = B's).
+
+1. **Detection:** YOLO11n (pretrained COCO `person` class) on each camera, every 3rd frame
+   by default. `--detector hog` uses OpenCV's classical HOG + linear SVM people detector.
+2. **Foot point:** bottom centre of each box, raised by a fitted fraction of the box height
+   (see step 8). Only the feet touch the floor, so only they map correctly through the floor
+   homography. Boxes cut off by the image edge are skipped.
+3. **Court position:** foot point mapped to metres with that camera's calibration. People
+   well outside the court (benches, spectators, walls) are dropped and shown with grey boxes.
+4. **Two-camera fusion:** each camera covers its own half; within 1 m of the net both are
+   used, and matching detections (Hungarian assignment, within 1.5 m) are averaged.
+   Detections closer than 0.4 m are one person.
+5. **Tracking in court coordinates:** detections are matched to each track's predicted
+   position (constant velocity, Hungarian assignment, 1.5 m gate). A new track must be matched
+   3 times in a row before it is drawn, and a track is only drawn while it was seen in the
+   last 0.4 s, so false detections and lost players don't leave stray dots.
+
+Options: `--show` (watch while rendering), `--every 1` (detect on every frame, about 3x
+slower), `--model yolo11s.pt` (slightly more accurate, about 2.4x slower), `--device 0`
+(NVIDIA GPU), `--foot-frac 0` (no foot correction).
+
+Outputs in `results/players/`: the video, and a `.csv` of court positions per detection step
+(`time_s, track_id, x_m, y_m, side, camera, confidence`).
+
+**Limitations:** a jumping player's feet are off the floor, so they map further from the
+camera than they are; a player hidden behind another in the camera covering their half can
+drop out; track IDs can change after a long occlusion or when players cross.
+
+### 8. Player detection accuracy
+Ground truth: the floor point between the feet of every player, clicked by hand at 10 moments
+spread over the game (each camera's half, both cameras). About 10 minutes of clicking:
+```
+python scripts/eval_players.py annotate data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --n 10
+```
+Left click adds a player, right click deletes the nearest click, `u` undoes, `Enter` moves to
+the next image, `s` skips, `q` saves and stops (run again to continue). `--redo` starts
+again; `--only 3 7` redoes single moments. Saved to `data/annotations/players_gt.json`
+(committed, so the evaluation can be rerun without clicking).
+
+Score the detectors (no clicking):
+```
+python scripts/eval_players.py evaluate
+```
+- Detections and clicks are mapped to the court and kept if they are in that camera's half.
+  A detection is correct if it is within 1.0 m of a click (one-to-one, Hungarian matching;
+  change with `--gate`).
+- Reports precision, recall, F1, count error, median position error and time per image, per
+  camera and for the whole two-camera **system** (fused, single frames, no tracking).
+- **Foot correction:** the bottom of a detection box lies about 10 px below where the feet
+  touch the floor. At these shallow viewing angles that is 0.66-0.84 m too close to the
+  camera, with almost no sideways error. Each detector is scored with the raw box bottom and
+  with the foot point raised by the median offset (a fraction of the box height), fitted with
+  2-fold cross-validation (the value used on odd moments is fitted on even moments and vice
+  versa). The value fitted on all moments is saved to `data/annotations/foot_offset.json`
+  and used by `players_on_court.py`.
+
+Outputs in `results/eval/`: `players_eval_summary.csv`, `players_eval_frames.csv`, and
+images in `vis/` (white ring = clicked player, green = correct detection, red = false
+detection, yellow X = missed player).
+
+**Results (Game 2):** 10 moments, 105 players, system rows (both cameras), 1.0 m match gate.
+
+| Detector | Foot point | Precision | Recall | F1 | Median position error | Time, both cameras |
+|---|---|---|---|---|---|---|
+| HOG + SVM | raw | 0.03 | 0.02 | 0.02 | 0.62 m | 446 ms |
+| HOG + SVM | corrected (13.6%) | 0.71 | 0.50 | 0.58 | 0.51 m | 446 ms |
+| YOLO11n | raw | 0.67 | 0.69 | 0.68 | 0.66 m | 264 ms |
+| **YOLO11n** | **corrected (5.3%)** | **0.94** | **0.91** | **0.93** | **0.25 m** | **264 ms** |
+| YOLO11s | raw | 0.67 | 0.73 | 0.70 | 0.65 m | 631 ms |
+| YOLO11s | corrected (5.6%) | 0.94 | 0.95 | 0.94 | 0.25 m | 631 ms |
+
+- The foot correction is the largest single improvement (YOLO11n F1 0.68 to 0.93). The two
+  cross-validation folds gave the same value (5.3% / 5.3%), so it is stable.
+- YOLO11s is only marginally better at 2.4x the cost, so YOLO11n is used.
+- HOG finds about half the players even after correction: its fixed window misses small,
+  distant and crouching players, and its boxes are loose.
+- Remaining misses (5-6 per camera) are mostly players hidden behind others. The position
+  error includes the error of the hand clicks.
+- Limitations: 10 moments from one game, one annotator, single frames (tracking not scored).
+  Times were measured on our development PC.
 
 ### Utility: click and plot points
 ```
