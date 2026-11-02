@@ -52,9 +52,18 @@ Test with `--dur 30` first, then lengthen. `--det-fps 5` halves the player-detec
 | `touches.csv`, `touch_evidence.jpg` | each ball event, who touched it, evidence crops |
 | `flights.csv` | 3-D ballistic fits between contacts |
 | `rallies.csv` | rally number, team touch count, FOUR_TOUCHES / DOUBLE_CONTACT flags |
+| `landings.csv` | IN / OUT per landing: measured spot (m), margin to the line, uncertainty, predicted-landing error after 25/50/75 % of the flight |
 
 ## Steps (each can be run alone with `python <step>.py --run runs\IMG_4833`)
-make_background → calibrate → vb_tracker → ball_track → ball_events → touches → flights → rules → render_overlay
+make_background → calibrate → vb_tracker → ball_track → ball_events → touches → flights → rules → landing → render_overlay
+
+## IN / OUT calls (landing.py)
+- **Measured:** at the bounce the ball's lowest pixel is on the floor, where the homography is exact → court (x, y).
+  A ball touching the line is IN; calls within ±3 px of floor resolution are marked "(close)".
+- **Predicted (live, during flight):** the 3-D gravity fit says *when* the ball meets the floor; the pixel track,
+  extrapolated with a quadratic (as in the cvzone article), says *where* in the image; the homography maps that to metres.
+- **Focal length is refined from physics:** the f at which ballistic fits land exactly when the ball is seen to land.
+  Needs ≥1 landing with a tracked flight; each landing is evaluated with f refined on the others.
 
 ## Assumptions that matter for a new video
 - Camera is **static** (tripod). If it moves, the homography and background are wrong.

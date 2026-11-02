@@ -12,14 +12,15 @@ Creates runs/<video name>/ and runs, in order:
   6 touches          -> touches.csv, touch_evidence.jpg    (RTMPose attribution)
   7 flights          -> flights.csv                        (ballistic 3-D fits)
   8 rules            -> rallies.csv                        (rallies, 3-touch, double contact)
-  9 render_overlay   -> touches_overlay.mp4                (final video)
+  9 landing          -> landings.csv                       (IN/OUT: measured at bounce + predicted in flight)
+ 10 render_overlay   -> touches_overlay.mp4                (final video)
 Re-running skips finished steps unless --redo names them, e.g. --redo rules (later steps re-run automatically)
 """
 import argparse, json, os, shutil, subprocess, sys, time, cv2
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEPS = [("make_background", "bg.png"), ("calibrate", "calib.json"), ("vb_tracker", "positions.csv"),
          ("ball_track", "ball_track.csv"), ("ball_events", "ball_events.csv"), ("touches", "touches.csv"),
-         ("flights", "flights.csv"), ("rules", "rallies.csv"), ("render_overlay", "touches_overlay.mp4")]
+         ("flights", "flights.csv"), ("rules", "rallies.csv"), ("landing", "landings.csv"), ("render_overlay", "touches_overlay.mp4")]
 ap = argparse.ArgumentParser()
 ap.add_argument("--video", required=True)
 ap.add_argument("--start", type=float, default=0, help="seconds")
@@ -44,7 +45,7 @@ cfg = dict(video=video, fps=fps, start=a.start, dur=dur, det_fps=a.det_fps, widt
 old = json.load(open(os.path.join(run, "run.json"))) if os.path.exists(os.path.join(run, "run.json")) else None
 json.dump(cfg, open(os.path.join(run, "run.json"), "w"), indent=1)
 if old and (old["start"], old["dur"], old["det_fps"]) != (cfg["start"], cfg["dur"], cfg["det_fps"]):
-    a.redo = list({*a.redo, "vb_tracker", "ball_track", "ball_events", "touches", "flights", "rules", "render_overlay"})
+    a.redo = list({*a.redo, "vb_tracker", "ball_track", "ball_events", "touches", "flights", "rules", "landing", "render_overlay"})
     print("time window changed -> re-running analysis steps")
 if a.calib: shutil.copy(a.calib, os.path.join(run, "calib.json"))
 

@@ -1,8 +1,0 @@
-t_s,frame,rally,kind,team,track_id,ball_z,team_touch,certain,crossed_by_flight,flag
-0.584,35,1.0,touch,far,5.0,0.84,1.0,True,False,
-1.652,99,,bounce,,,-0.07,,,,
-15.739,943,,bounce,,,-0.15,,,,
-17.559,1052,2.0,touch,near,1.0,0.97,1.0,True,True,
-19.161,1148,2.0,touch,near,3.0,1.7,2.0,True,False,
-20.73,1242,2.0,touch,far,1.0,2.35,1.0,True,False,
-21.631,1296,2.0,touch,far,26.0,1.08,2.0,True,False,

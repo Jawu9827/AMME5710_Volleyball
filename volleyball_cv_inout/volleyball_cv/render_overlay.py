@@ -6,6 +6,10 @@ SRC, OUT = "tracking.mp4", "touches_overlay.mp4"
 FPS = a.cfg["fps"]
 SRC_FRAMES = [int(l) for l in open("tracking_frames.txt")]   # source frame index of each tracking.mp4 frame
 IMG_H = json.load(open("calib.json")).get("image_size", [1920, 1080])[1]
+import os, pickle
+PRED = pickle.load(open("landing_pred.pkl", "rb")) if os.path.exists("landing_pred.pkl") else {}
+LAND = pd.read_csv("landings.csv") if os.path.exists("landings.csv") and os.path.getsize("landings.csv") > 1 else pd.DataFrame()
+PK = np.array(sorted(PRED))
 trk = pd.read_csv("ball_track.csv").set_index("frame")
 R = pd.read_csv("rallies.csv"); pos = pd.read_csv("positions.csv")
 live = R[R.kind.isin(["touch", "block"])].copy()
@@ -67,5 +71,23 @@ while True:
             q = m2px(pr.iloc[0].x_m, pr.iloc[0].y_m)
             cv2.circle(f, q, 15, (0, 255, 0), 2, cv2.LINE_AA)
             cv2.putText(f, n(c.team_touch), (q[0] - 6, q[1] - 18), 0, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    # ---- predicted landing while the ball is in the air ----
+    if len(PK):
+        j = PK[PK <= fr]
+        if len(j) and PRED[int(j[-1])]["until"] >= fr and fr - j[-1] <= round(0.2 * FPS):
+            P = PRED[int(j[-1])]; col = (60, 200, 60) if P["call"].startswith("IN") else (60, 60, 230)
+            pts = (P["path"] * [sc, sy]).astype(np.int32)
+            for i in range(0, len(pts) - 1, 2): cv2.line(f, tuple(pts[i]), tuple(pts[i + 1]), (255, 0, 255), 2, cv2.LINE_AA)
+            lp = (int(P["land_px"][0] * sc), int(P["land_px"][1] * sy))
+            cv2.drawMarker(f, lp, (255, 0, 255), cv2.MARKER_TILTED_CROSS, 18, 3)
+            cv2.putText(f, f"predicted: {P['call']}", (lp[0] + 14, lp[1] + 26), 0, 0.7, (255, 0, 255), 2, cv2.LINE_AA)
+            q = m2px(*P["land"]); cv2.drawMarker(f, q, (255, 0, 255), cv2.MARKER_TILTED_CROSS, 16, 2)
+    # ---- measured line call for 1.5 s after the bounce ----
+    for _, l in LAND.iterrows():
+        if 0 <= fr - l.frame <= round(1.5 * FPS):
+            col = (60, 200, 60) if str(l.call).startswith("IN") else (60, 60, 230)
+            q = m2px(l.x_m, l.y_m); cv2.circle(f, q, 10, col, -1); cv2.circle(f, q, 10, (255, 255, 255), 2)
+            cv2.rectangle(f, (930, 52), (1270, 112), (25, 25, 25), -1)
+            cv2.putText(f, f"{l.call}  ({l.margin_m:+.2f} m)", (944, 94), 0, 1.0, col, 3, cv2.LINE_AA)
     wr.write(f); k += 1
 wr.release(); print(f"touches_overlay.mp4: {k} frames")
