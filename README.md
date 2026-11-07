@@ -22,9 +22,37 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 | Touches, who touched it, 3-touch / double-contact rules on the 3D track | Done: 7/9 contacts attributed on a real rally; not yet scored against ground truth |
 | Live landing prediction during the flight | Done: 2-10 cm on synthetic serves; 0.5-2 m on real footage, calls right |
 | One-command pipeline and combined video | Done: `run_pipeline.py`, `render_full.py` |
-| Single-camera pipeline: players, touches, 3-touch rule (`volleyball_cv_inout/`) | Done (see its own README) |
 
 ---
+
+## Quick start
+
+After setup (below), with the Game 2 videos in `data/`:
+```
+python scripts/run_pipeline.py --start 30 --duration 30
+```
+This runs players, 3D ball, line calls, touches and rules, and landing prediction on 30-60 s of
+the match, and writes one video with everything: `results/full/game2_A_game2_B_sdr_full_from30.mp4`.
+Calibrations and the audio sync are already in `data/annotations/`. Steps 1-5 below only need
+re-running for new footage.
+
+| Script | Step | Purpose |
+|---|---|---|
+| `inspect_video.py` | 1 | Video properties, dropped frames, HDR check, frame export |
+| `hdr_to_sdr.py` | 2 | iPhone HDR (HLG) to normal video |
+| `detect_court_lines.py` | 3 | Automatic yellow court-line detection |
+| `calibrate_camera.py` | 4 | Court calibration (homography + lens distortion), accuracy, tripod check |
+| `sync_videos.py` | 5 | Audio sync between the cameras |
+| `players_on_court.py` | 7 | Player detection, court positions, tracking |
+| `eval_players.py` | 8 | Player detection accuracy against hand clicks |
+| `ball_detect.py`, `camera_3d.py`, `ball_two_cameras.py` | 9 | Ball candidates, camera models, 3D ball |
+| `line_calls.py` | 10 | Bounces and IN/OUT calls |
+| `synthetic_render.py`, `synthetic_score.py` | 11 | Synthetic clip with exact ground truth |
+| `touches_rules.py` | 12 | Contacts, who touched it, 3-touch / double-contact rules |
+| `landing_predict.py` | 13 | Landing prediction during the flight |
+| `run_pipeline.py`, `render_full.py` | 14 | Everything in one command and one video |
+| `pick_points.py` | utility | Click and plot points (hand labels) |
+| `court_detect.py`, `court_live.py`, `annotate_court.py`, `court_batch_eval.py`, `manual_homography.py`, `court_lines.py` | earlier work | Court detection on broadcast footage |
 
 ## Setup
 
@@ -47,8 +75,8 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` must include `opencv-contrib-python`, `numpy`, `scipy`, `matplotlib`,
-`imageio-ffmpeg` and `ultralytics`.
+`requirements.txt` lists `numpy`, `scipy`, `opencv-contrib-python`, `matplotlib`, `imageio-ffmpeg`
+and `ultralytics`.
 - `imageio-ffmpeg` provides ffmpeg (with the `zscale` filter needed for HDR conversion), so
   ffmpeg does not need to be installed separately.
 - `ultralytics` provides YOLO for player detection. It installs PyTorch (large; the CPU
@@ -70,7 +98,7 @@ Videos are **not** in Git: they're too large, and GitHub rejects files over 100 
 | `data/` | No | Videos, e.g. `data/game2_A.mp4`, `data/game2_B_sdr.mp4` |
 | `data/annotations/` | **Yes** | Calibrations, sync offsets, hand-clicked ground truth, fitted foot offset (small JSON files) |
 | `frames/` | No | Frames saved by `inspect_video.py` |
-| `results/` | No | Debug images, overlays, combined, synced and player videos, evaluation output |
+| `results/` | No | Debug images, overlays, ball / player / full-pipeline videos, evaluation output |
 
 ### Game 2 footage (current)
 
@@ -210,16 +238,9 @@ of 8 chunks agreeing and one clear correlation peak. Sound travel between the ph
 the accuracy to about ±1–2 frames, so confirm it on a serve contact.
 
 ### 6. Synced views
-Side by side, with no overlays:
-```
-python scripts/combine_videos.py data/game2_A.mp4 data/game2_B_sdr.mp4 --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 0 --duration 3:00
-```
-Courts drawn on both cameras, each camera's half shaded, a top-down court map, and a
-once-per-second tripod check:
-```
-python scripts/court_view_synced.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 60
-```
-Add `--show` to watch while it renders. Outputs go to `results/combined/` and `results/synced/`.
+Both cameras side by side are drawn by `render_full.py` (step 14), with the court lines, players,
+ball, contacts and calls. For a synced view before the later steps exist, run step 7
+(`players_on_court.py`), which shows both synced cameras with the court and players.
 
 ### 7. Player detection and court positions
 ```
@@ -385,8 +406,8 @@ ball; a drawn ball is used if it is missing).
 ```
 python scripts/touches_rules.py results/ball/game2_A_game2_B_sdr_ball_from30.json --players results/players/game2_A_game2_B_sdr_players_from30.csv
 ```
-Adapted from the single-camera pipeline in `volleyball_cv_inout/` (its `ball_events.py`,
-`touches.py` and `rules.py`), but on the two-camera 3D ball track. `--players` (the
+Adapted from a teammate's single-camera prototype (its `ball_events.py`, `touches.py` and
+`rules.py`), but on the two-camera 3D ball track. `--players` (the
 `players_on_court.py` CSV for the same window) is optional; it gives track IDs, which are needed for
 double contacts.
 1. **Contacts:** a ball in free flight follows a fixed-gravity arc. At each 3D sample, arcs fitted to
@@ -417,7 +438,7 @@ Outputs in `results/touches/`: `_touches.csv` (one row per contact or bounce), `
 (ball height with every event labelled, plus contact points on the court) and `_evidence.jpg` (the
 crop used for each contact, with the skeleton and the ball).
 
-What changed from `volleyball_cv_inout/`: contacts are found from 3D velocity changes rather than
+What changed from the single-camera prototype: contacts are found from 3D velocity changes rather than
 2D pixel kinks; the ball's position at each frame comes from the arcs (known where the 2D detector
 missed it); the toucher has to be within reach in court metres, not just close in the image;
 possession uses real net crossings; YOLO11-pose replaces RTMPose (no extra install).
@@ -438,7 +459,7 @@ contacts; contacts during unseen stretches (e.g. the serve at about 48 s) are mi
 ```
 python scripts/landing_predict.py results/ball/game2_A_game2_B_sdr_ball_from30.json
 ```
-Adapted from `landing.py` in `volleyball_cv_inout/`. With one camera, that needs a 3D gravity fit
+Adapted from `landing.py` in the single-camera prototype. With one camera, that needs a 3D gravity fit
 for *when* the ball lands, a pixel extrapolation for *where*, and a focal length tuned from physics.
 With two cameras the 3D position is measured, so one fit gives both.
 1. Flight = 3D samples since the last contact before each floor bounce (step 12), or since the
@@ -557,8 +578,3 @@ the earlier version of `inspect_video.py`. The current version names frames `tSS
 5. Compare the ball detector with TrackNetV3 on the same clips.
 6. Hand-label contacts (time and player) on a few rallies to score `touches_rules.py`.
 7. Add air drag to the landing prediction, and test it on bounces near the lines.
-
-## Single-camera pipeline (`volleyball_cv_inout/volleyball_cv/`)
-A separate, one-camera pipeline for players (YOLO11-pose, ByteTrack, court minimap), ball
-touches (RTMPose), the 3-touch rule and single-camera in/out calls. Run with `run_all.py`;
-setup and outputs are in its own README.

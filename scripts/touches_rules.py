@@ -7,7 +7,7 @@ needed for DOUBLE_CONTACT, since that needs player identities):
     --pose-model yolo11m-pose.pt   pose model (downloaded automatically on first use)
     --no-evidence                  skip the evidence image (faster: no frames are read)
 
-Adapted from the single-camera pipeline in volleyball_cv_inout/ (ball_events.py, touches.py,
+Adapted from the team's single-camera prototype (ball_events.py, touches.py,
 rules.py), but working on the two-camera 3D track instead of a 2D pixel track:
 
 1. Contacts. Between contacts the ball is in free flight, so its 3D path is a fixed-gravity arc.

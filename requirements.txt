@@ -2,14 +2,5 @@ numpy
 scipy
 opencv-contrib-python
 matplotlib
-scikit-learn
-scikit-image
-pyyaml
-tqdm
-pandas
-jupyter
-ipykernel
-torch
-torchvision
 imageio-ffmpeg
 ultralytics

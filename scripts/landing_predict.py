@@ -3,7 +3,7 @@
 Usage (after line_calls.py and touches_rules.py for the same run):
     python scripts/landing_predict.py results/ball/game2_A_game2_B_sdr_ball_from30.json
 
-Adapted from landing.py in volleyball_cv_inout/. There, one camera needs a 3D gravity fit for
+Adapted from landing.py in the team's single-camera prototype. There, one camera needs a 3D gravity fit for
 WHEN the ball lands and a pixel extrapolation for WHERE, plus a physics-tuned focal length. With
 two cameras the ball's 3D position is measured, so one fit gives both.
 

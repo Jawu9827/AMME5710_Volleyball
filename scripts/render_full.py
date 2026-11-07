@@ -7,7 +7,7 @@ Usage (after the other steps for the same window; run_pipeline.py runs them all)
     --players <csv>    players_on_court.py output (default: same videos and start time)
     --show             watch while rendering (q quit, space pause)
 
-Adapted from render_overlay.py in volleyball_cv_inout/ (rally HUD, contact flashes, predicted
+Adapted from render_overlay.py in the team's single-camera prototype (rally HUD, contact flashes, predicted
 landing). Inputs, all looked up from the ball run's file names:
     results/ball/<stem>.csv                        ball 2D in each camera and 3D
     results/players/<A>_<B>_players_from<s>.csv    player court positions and track IDs

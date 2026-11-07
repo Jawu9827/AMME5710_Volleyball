@@ -58,9 +58,24 @@ from scipy.optimize import linear_sum_assignment
 
 sys.path.insert(0, str(Path(__file__).parent))
 from calibrate_camera import duration, load_calibration, read_frame  # noqa: E402
-from court_view_synced import COLOURS, shade_half  # noqa: E402
 from players_on_court import (COURT_MARGIN, FOOT_PATH, NET_Y, HogPeople, YoloPeople,  # noqa: E402
                               feet_to_court, fuse)
+
+HALF = {"near": ((0, 9), (9, 9), (9, 18), (0, 18)),     # camera behind y=18 judges y 9..18
+        "far": ((0, 0), (9, 0), (9, 9), (0, 9))}        # camera behind y=0 judges y 0..9
+COLOURS = {"A": (0, 200, 255), "B": (80, 230, 80)}     # BGR: orange for A, green for B
+
+
+def shade_half(img, cal, end, colour, alpha=0.18):
+    """Shade the half of the court a camera judges."""
+    pts = []
+    for (x0, y0), (x1, y1) in zip(HALF[end], HALF[end][1:] + HALF[end][:1]):
+        s = np.linspace(0, 1, 30)[:, None]
+        pts.append(cal.court_to_image(np.array([x0, y0]) * (1 - s) + np.array([x1, y1]) * s))
+    poly = np.int32(np.round(np.vstack(pts)))
+    over = img.copy()
+    cv2.fillPoly(over, [poly], colour)
+    return cv2.addWeighted(over, alpha, img, 1 - alpha, 0)
 
 GT_PATH = Path("data/annotations/players_gt.json")
 FRAME_DIR = Path("results/eval/frames")

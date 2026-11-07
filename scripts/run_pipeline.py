@@ -7,7 +7,7 @@ Usage (Game 2 files are the defaults):
         --calib-a ... --calib-b ... --sync ... --start 0 --duration 20
 
 Needs the one-off setup steps first (README steps 2-5): calibrations and the audio sync.
-Steps, each skipped if its output already exists (like run_all.py in volleyball_cv_inout/):
+Steps, each skipped if its output already exists (like run_all.py in the team's single-camera prototype):
   1 players   players_on_court.py  -> results/players/<A>_<B>_players_from<s>.csv
   2 ball      ball_two_cameras.py  -> results/ball/<A>_<B>_ball_from<s>.json (+ .csv)
   3 calls     line_calls.py        -> results/calls/<stem>_calls.csv
