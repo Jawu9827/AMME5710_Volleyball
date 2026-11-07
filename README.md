@@ -16,8 +16,10 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 | Game 2: audio sync between cameras | Done: offset +9.71 s, 6/8 chunks agree |
 | Game 2: synced two-camera court view | Done |
 | Player detection and top-down court map | Done: YOLO11n, F1 0.93, median position error 0.25 m |
-| Ball tracking | On the `Ball-Detection-+-Tracking` branch, not merged yet |
-| Bounce detection and in/out calls | Not started |
+| Ball tracking in 3D (two cameras) | Done: 77% of frames on an 8 s real rally, no false balls |
+| Bounce detection and in/out calls | Done: 3/3 correct on synthetic serves (error across the line 0.5-6.9 cm) |
+| Synthetic test with exact ground truth | Done: 3D error median 1.6 cm, sync refined to 1 ms |
+| Single-camera pipeline: players, touches, 3-touch rule (`volleyball_cv_inout/`) | Done (see its own README) |
 
 ---
 
@@ -301,6 +303,80 @@ detection, yellow X = missed player).
 - Limitations: 10 moments from one game, one annotator, single frames (tracking not scored).
   Times were measured on our development PC.
 
+### 9. Ball in 3D from both cameras
+```
+python scripts/ball_two_cameras.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 10
+```
+No learned ball detector; the second camera does the filtering.
+- **Each camera** (`ball_detect.py`): three-frame difference (frames compared a fixed *time*
+  apart, so 30 and 60 fps behave the same), opening/closing, then size (the 21 cm ball's
+  possible image size from the 3D camera), shape (up to 5:1 for motion blur, at least 25% fill),
+  ball colour (yellow/blue share, plus a precise colour centre for bounces), person boxes from
+  YOLO every 3rd frame, isolation. Candidates are linked into 2D tracklets (constant velocity,
+  Hungarian, gate in ball radii).
+- **Both cameras**: for every pair of tracklets that overlap in time, camera B is interpolated
+  to each camera A frame time and the pair is triangulated (DLT). A pair is the ball only if
+  the rays meet (< 12 px) on 10+ frames and 80% of the overlap, median speed >= 3 m/s, it fits a
+  fixed-gravity parabola within 3 cm (weighted by ray angle), it is ball-coloured (>= 45%), and
+  the blob size matches a 21 cm ball at the triangulated distance (0.6-2.5x). The script prints
+  how many pairs each rule rejected.
+- **Sub-frame sync**: the audio offset is refined on the accepted pairs (+-0.15 s in 2 ms steps,
+  lowest median reprojection error), then matching is repeated.
+- Rays closer than 3 deg to parallel are flagged `3d weak` (near camera height between the
+  cameras); near the floor the geometry is good.
+
+Outputs in `results/ball/`: `<A>_<B>_ball_from<start>.mp4` (both views, top and side view),
+`.csv` (per camera A frame: 2D positions, x, y, z, reprojection error, ray angle, status),
+`_trajectory.png`, `.json` (run details and refined offset) and `_tracks2d.csv` (per-camera
+2D tracks with colour centres, used for single-camera bounces).
+
+**Real footage:** 3D coverage on an 8 s rally went from 15% to 77% of frames with no false
+balls after the time-based frame step, a 3 m/s speed floor, reusing tracklets in different
+pairs, the angle-weighted gravity test and the colour threshold.
+
+### 10. Bounces and in/out calls
+```
+python scripts/line_calls.py results/ball/game2_A_game2_B_sdr_ball_from30.json
+```
+1. Bounce candidates: low points (< 0.45 m) where the ball stops descending, per continuous
+   stretch of 3D track (gaps > 0.2 s split it).
+2. Contact point: ballistic arcs (g fixed) fitted to up to 0.4 s before and after, weighted by
+   sin^2(ray angle); contact is where the ball centre is one radius (0.105 m) above the floor.
+3. Uncertainty from the fit covariance, separately across and along the court, plus 5 cm of
+   calibration error (`--calib-sigma`).
+4. Call (FIVB: lines are in, court measured to their outer edges): IN if the 3 cm contact patch
+   reaches the line (`--contact-radius`), else OUT; "close" when the margin is under 2 sigma.
+5. Bounce seen by one camera only: quadratics fitted to its image path before and after the
+   turn meet at the contact pixel; its ray at z = 0.105 m gives the floor point. If the curves
+   miss by more than 6 px (e.g. uneven frame timing) the call is UNRELIABLE.
+
+Outputs in `results/calls/`: `_calls.csv` (one row per bounce), `_calls.png` (court with
+2-sigma circles and a height plot), `_bounce<N>.jpg` (zoomed replay from both cameras).
+
+### 11. Synthetic test (exact ground truth)
+Real games have no ground truth for landing spots, so `synthetic_render.py` draws a clip where
+everything is known: two virtual cameras placed like ours (exact calibrations saved), a court,
+twelve moving players, a decoy ball, and a ball flying a toss and three serves (IN 2 m inside,
+OUT 30 cm outside, and IN with the centre 2 cm outside the sideline). Camera B is shifted by
+2.017 s; the pipeline starts from a 2.000 s guess.
+```
+python scripts/synthetic_render.py
+cd data/synthetic
+python ../../scripts/ball_two_cameras.py A.mp4 B.mp4 --calib-a calib_A.json --calib-b calib_B.json --sync sync.json --start 0.3 --duration 7.2
+python ../../scripts/line_calls.py results/ball/A_B_ball_from0.3.json
+python ../../scripts/synthetic_score.py results/ball/A_B_ball_from0.3.csv results/calls/A_B_ball_from0.3_calls.csv
+```
+| Measure | Result |
+|---|---|
+| Calls | 3 / 3 correct (serve 3 called IN, close) |
+| Contact error across the judged line | 1.2, 6.9, 0.5 cm |
+| 3D ball error | median 1.6 cm, 90th percentile 6.6 cm, 99 of 196 frames, no false points |
+| Sync refinement | 2.016 s vs true 2.017 s (1 ms) |
+
+Not tested by it: calibration error (cameras are exact), audio sync, motion blur, 60 fps / HDR,
+uneven frame timing. The ball image is `data/annotations/ball_patch.png` (a crop of the real
+ball; a drawn ball is used if it is missing).
+
 ### Utility: click and plot points
 ```
 python scripts/pick_points.py data/game2_A.mp4 --time 60 --names ball landing
@@ -365,8 +441,14 @@ the earlier version of `inspect_video.py`. The current version names frames `tSS
 
 ## Next steps
 
-1. Merge the ball tracker from `Ball-Detection-+-Tracking` and run it on both Game 2 videos.
-2. Bounce detection: the frame where the ball's vertical image motion reverses at the floor.
-3. Map the bottom of the ball at the bounce through that camera's calibration into court
-   coordinates, and call it in or out (line contact counts as in).
-4. Hand-label landing spots with `pick_points.py` to measure call accuracy.
+1. Record both phones at 60 fps with Auto FPS off (camera A's uneven frame timing made a real
+   corner bounce UNRELIABLE).
+2. Mount the cameras higher, or add a third phone at the side, for high balls and depth near the net.
+3. Hand-label real landing spots with `pick_points.py` to measure in/out accuracy on real rallies.
+4. Refit both calibrations with the line-centre convention (`calibrate_camera.py --points-json`).
+5. Compare the ball detector with TrackNetV3 on the same clips.
+
+## Single-camera pipeline (`volleyball_cv_inout/volleyball_cv/`)
+A separate, one-camera pipeline for players (YOLO11-pose, ByteTrack, court minimap), ball
+touches (RTMPose), the 3-touch rule and single-camera in/out calls. Run with `run_all.py`;
+setup and outputs are in its own README.

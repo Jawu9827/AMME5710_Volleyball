@@ -19,7 +19,9 @@ Per frame:
      model (camera_3d.py) we know the smallest (far end of the court) and largest (2 m from the
      lens) possible ball size. Blobs outside that range, too elongated (blur streaks up to 5:1
      allowed) or too hollow are rejected.
-  4. Colour score: fraction of the blob's pixels that are ball yellow or ball blue (HSV).
+  4. Colour score: fraction of the blob's pixels that are ball yellow or ball blue (HSV). Where
+     the blob is clearly the ball's colour, a precise centre is also taken from the yellow pixels
+     inside it (blur and the ball's shadow bias the blob centre); used for bounce contact points.
   5. Optional person boxes (YOLO, every few frames): a candidate inside a player is flagged.
      Most moving blobs are arms, heads and legs; the ball is usually away from bodies in flight.
   6. Isolation: share of the area around the blob (a box 3x its size) that is NOT moving.
@@ -43,6 +45,8 @@ BALL_R = 0.105
 MIN_DIFF = 14            # minimum colour change (0-255) counted as motion
 MAX_ELONG = 5.0          # longest / shortest side of a blob (motion blur)
 MIN_FILL = 0.25          # blob area / bounding-box area
+GATE_R, GATE_V = 2.5, 0.35  # linking gate: GATE_R ball radii + GATE_V x speed (+ 8 px) per frame
+                            # (wider gates mislinked the ball to players on real footage)
 YELLOW = ((18, 42), 60, 70)     # hue range, min saturation, min value
 BLUE = ((95, 130), 70, 50)
 
@@ -116,6 +120,18 @@ class Candidates:
             yel = (hh >= YELLOW[0][0]) & (hh <= YELLOW[0][1]) & (ss >= YELLOW[1]) & (vv >= YELLOW[2])
             blu = (hh >= BLUE[0][0]) & (hh <= BLUE[0][1]) & (ss >= BLUE[1]) & (vv >= BLUE[2])
             u, v = cent[i]
+            # A second, more precise centre (cu, cv) from the ball's own colour: the motion blob of
+            # a fast or bouncing ball also contains blur and its shadow, which pulls its centroid
+            # down (8 px close to a camera = ~16 cm on the floor). Yellow pixels inside the
+            # (slightly grown) moving blob are the ball at this frame; still court lines are
+            # excluded because they do not move. Tracking uses the motion centre (more robust on
+            # real footage); bounce contact points use the colour centre.
+            ph = patch[..., 0]
+            yel_full = ((ph >= YELLOW[0][0]) & (ph <= YELLOW[0][1]) & (patch[..., 1] >= YELLOW[1])
+                        & (patch[..., 2] >= YELLOW[2]))
+            grown = cv2.dilate(sel.astype(np.uint8), self.k_open) > 0
+            ys, xs = np.nonzero(yel_full & grown)
+            cu, cv_ = (x + xs.mean(), y + ys.mean()) if len(xs) >= max(15, 0.3 * area) else (u, v)
             inside = bool(len(self.person_boxes) and np.any(
                 (self.person_boxes[:, 0] <= u) & (u <= self.person_boxes[:, 2]) &
                 (self.person_boxes[:, 1] <= v) & (v <= self.person_boxes[:, 3])))
@@ -124,7 +140,8 @@ class Candidates:
             xb, yb = min(self.w, x + bw + e), min(self.h, y + bh + e)
             moving = integ[yb, xb] - integ[ya, xb] - integ[yb, xa] + integ[ya, xa] - area
             iso = 1.0 - moving / max(1.0, (xb - xa) * (yb - ya) - area)
-            out.append(dict(k=k, u=float(u), v=float(v), r=float(r), area=int(area), elong=float(elong),
+            out.append(dict(k=k, u=float(u), v=float(v), cu=float(cu), cv=float(cv_), r=float(r), area=int(area),
+                            elong=float(elong),
                             yellow=float(np.mean(yel)), colour=float(np.mean(yel | blu)), person=inside,
                             iso=float(iso),
                             box=(int(x), int(y), int(bw), int(bh))))
@@ -151,7 +168,7 @@ def link_tracklets(frames, scale, max_gap=2, step=1):
                 if len(tr["pts"]) == 1:
                     gate = (8 * last["r"] + 10 * scale) * gap / step
                 else:
-                    gate = (2.5 * last["r"] + 0.35 * speed * step + 8 * scale) * gap / step
+                    gate = (GATE_R * last["r"] + GATE_V * speed * step + 8 * scale) * gap / step
                 for j, c in enumerate(cands):
                     d = np.hypot(c["u"] - pu, c["v"] - pv)
                     ratio = c["r"] / max(last["r"], 1e-3)

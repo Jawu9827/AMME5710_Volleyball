@@ -56,19 +56,29 @@ import cv2
 import numpy as np
 from scipy.optimize import least_squares
 
+# Court lines are 5 cm wide and lie INSIDE the 9 x 18 m court (whose size is measured to the
+# outer edges). Clicks and detected lines are on the CENTRE of the painted line, so they are
+# modelled at the line centres: boundary lines 2.5 cm inside the edge, attack lines with their
+# rear edge 3 m from the centre-line axis (centre 2.975 m from it), centre line on the axis.
+# The court frame itself (0-9, 0-18) stays the outer boundary, which is what in/out is judged on.
+LINE_W = 0.05
+_h = LINE_W / 2
+X_L, X_R = _h, 9 - _h                       # sideline centres
+Y_FAR, Y_NEAR = _h, 18 - _h                 # end line centres (camera's own view)
+Y_ATT_FAR, Y_ATT_NEAR = 9 - 3 + _h, 9 + 3 - _h
 # Intersections in the camera's own view; court coords for a camera behind y = 18.
 POINTS = [
-    ("near-left corner", (0, 18)), ("near-right corner", (9, 18)),
-    ("near attack line / left sideline", (0, 12)), ("near attack line / right sideline", (9, 12)),
-    ("centre line / left sideline (under net)", (0, 9)), ("centre line / right sideline (under net)", (9, 9)),
-    ("far attack line / left sideline", (0, 6)), ("far attack line / right sideline", (9, 6)),
-    ("far-left corner", (0, 0)), ("far-right corner", (9, 0)),
+    ("near-left corner", (X_L, Y_NEAR)), ("near-right corner", (X_R, Y_NEAR)),
+    ("near attack line / left sideline", (X_L, Y_ATT_NEAR)), ("near attack line / right sideline", (X_R, Y_ATT_NEAR)),
+    ("centre line / left sideline (under net)", (X_L, 9)), ("centre line / right sideline (under net)", (X_R, 9)),
+    ("far attack line / left sideline", (X_L, Y_ATT_FAR)), ("far attack line / right sideline", (X_R, Y_ATT_FAR)),
+    ("far-left corner", (X_L, Y_FAR)), ("far-right corner", (X_R, Y_FAR)),
 ]
-# Lines in the camera's own view: (name, axis, value) meaning "axis = value" on the court
+# Lines in the camera's own view: (name, axis, value) meaning "axis = value" (line centre)
 LINES = [
-    ("near end line", "y", 18), ("near attack line", "y", 12), ("centre line (under net)", "y", 9),
-    ("left sideline", "x", 0), ("right sideline", "x", 9),
-    ("far attack line", "y", 6), ("far end line", "y", 0),
+    ("near end line", "y", Y_NEAR), ("near attack line", "y", Y_ATT_NEAR), ("centre line (under net)", "y", 9),
+    ("left sideline", "x", X_L), ("right sideline", "x", X_R),
+    ("far attack line", "y", Y_ATT_FAR), ("far end line", "y", Y_FAR),
 ]
 COURT_LINES = [((0, 0), (9, 0)), ((0, 6), (9, 6)), ((0, 9), (9, 9)), ((0, 12), (9, 12)),
                ((0, 18), (9, 18)), ((0, 0), (0, 18)), ((9, 0), (9, 18))]
@@ -378,6 +388,8 @@ def main():
     p.add_argument("--valid", nargs=2, type=float, metavar=("FROM_S", "TO_S"),
                    help="record that this calibration is valid only for this time range")
     p.add_argument("--points-json", help="reuse clicks from a saved calibration instead of clicking")
+    p.add_argument("--drop", nargs="*", default=[],
+                   help="leave out these clicked points (exact names) when refitting, e.g. a misclick")
     p.add_argument("--auto-lines", help="JSON from detect_court_lines.py for the same frame size: its "
                    "line samples and near corners are added to your clicks")
     args = p.parse_args()
@@ -414,6 +426,14 @@ def main():
                 added_c += 1
         print(f"Added from {args.auto_lines}: {added_l} line points, {added_c} corners")
 
+    if args.drop:
+        unknown = [d for d in args.drop if d not in {n for n, _ in clicked}]
+        if unknown:
+            raise SystemExit(f"--drop: no clicked point named {unknown}. Names: {[n for n, _ in clicked]}")
+        clicked = [(n, uv) for n, uv in clicked if n not in args.drop]
+        print(f"Dropped: {', '.join(args.drop)}")
+    if len(clicked) < 4:
+        raise SystemExit(f"Only {len(clicked)} intersection points: at least 4 are needed for a homography.")
     lookup = dict(POINTS)
     pts_img = np.array([uv for _, uv in clicked], float)
     pts_court = np.array([to_shared(lookup[n], args.end) for n, _ in clicked], float)

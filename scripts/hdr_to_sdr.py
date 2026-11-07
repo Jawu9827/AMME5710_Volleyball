@@ -65,7 +65,21 @@ def main():
                    "so pixel coordinates match your other 1080p files)")
     args = p.parse_args()
 
+    src = Path(args.input)
+    if not src.exists():
+        # Windows hides extensions: try the usual iPhone/video ones
+        found = [src.with_name(src.name + e) for e in (".MOV", ".mov", ".mp4", ".MP4", ".m4v")
+                 if src.with_name(src.name + e).exists()]
+        if not found:
+            raise SystemExit(f"File not found: {src}\n(Run 'dir {src.parent}' to see exact names; "
+                             "Windows may be hiding the extension, e.g. IMG_4857.MOV)")
+        src = found[0]
+        print(f"Using {src}")
+    args.input = str(src)
     info = describe(args.input)
+    if not info:
+        r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", args.input], capture_output=True, text=True)
+        raise SystemExit("ffmpeg could not read a video stream from this file:\n" + r.stderr.strip()[-600:])
     print(info.strip())
     if "arib-std-b67" in info:
         transfer = "arib-std-b67"           # HLG (iPhone default HDR)
@@ -95,8 +109,8 @@ def main():
     print(f"Saved {args.output}")
 
     # Before/after comparison at the same moment
-    t_in = (args.start or 0) + 1.0
-    before, after = frame(args.input, t_in), frame(args.output, 1.0)
+    t_rel = min(1.0, args.duration / 2) if args.duration else 1.0
+    before, after = frame(args.input, (args.start or 0) + t_rel), frame(args.output, t_rel)
     if before is not None and after is not None:
         w = 960
         a = cv2.resize(before, (w, int(w * before.shape[0] / before.shape[1])))

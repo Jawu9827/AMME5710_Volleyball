@@ -18,7 +18,9 @@ Pipeline (no learned ball detector; see ball_detect.py for steps 1-2):
      the pair is triangulated. The pair is the ball if
        - the two cameras agree (rays meet: reprojection error below MAX_REPROJ) on 10+ frames
          and on 80% of the frames where both tracklets exist,
-       - the 3D path is inside the hall and moves (median speed > 2 m/s),
+       - the 3D path is inside the hall, moves (median speed > 3 m/s) and obeys gravity
+         (fixed-g parabola fits within 3 cm over 9-frame windows, weighted by ray angle),
+       - the blobs are ball-coloured (30%+ of their pixels ball yellow or blue),
        - the blob size matches a 21 cm ball at the triangulated distance (0.6-2.5x). This is the
          strongest test: two unrelated blobs triangulate to a wrong distance, so their size is off.
      Pairs are accepted best first (most agreeing frames, most ball-coloured); one ball at a time.
@@ -36,6 +38,8 @@ Outputs (results/ball/):
     <A>_<B>_ball_from<start>.csv   per camera-A frame: 2D positions, x, y, z, reprojection
                                    error, ray angle, status
     <A>_<B>_ball_from<start>_trajectory.png   x, y and height against time
+    <A>_<B>_ball_from<start>.json  run details (videos, calibrations, refined offset) for
+                                   line_calls.py
 """
 import argparse
 import csv
@@ -59,7 +63,10 @@ TRAIL_S = 1.5
 REFINE_STEP = 0.002     # s
 MIN_PAIR_FRAMES = 10    # frames on which both cameras must agree (0.33 s at 30 fps)
 MIN_AGREE = 0.8         # ... out of the frames where both tracklets have the ball
-MIN_SPEED = 2.0         # m/s, median 3D speed (amateur passes and sets can be ~4 m/s)
+MIN_SPEED = 3.0         # m/s, median 3D speed (amateur passes and sets can be ~3.5-4 m/s)
+MIN_COLOUR = 0.3        # mean share of ball-yellow/blue pixels in the blobs (body parts ~0.1)
+MAX_BALLISTIC = 0.03    # m; median RMS of fixed-gravity parabola fits over 9-frame windows,
+                        # weighted by sin(ray angle) (real ball 0.7-2.2 cm, arms/heads 3.5+)
 SIZE_RATIO = (0.6, 2.5)   # measured / expected image radius at the triangulated distance
 MAX_TRACKS = 3000       # safety cap on tracklets per camera considered for matching
 
@@ -113,6 +120,30 @@ def build_tracks(frames, fps, scale, min_frames=MIN_PAIR_FRAMES, step=1):
     return tracks[:MAX_TRACKS]
 
 
+def ballistic_rms(frames, fps, win=9):
+    """How well a 3D path obeys gravity: median over sliding windows of `win` samples of the
+    RMS residual (m) of a parabola fit (x, y linear in time, z = z0 + vz t - g t^2 / 2 with g
+    fixed). Each sample is weighted by sin(angle between the two rays): the triangulation error
+    grows as 1 / sin(angle), so near the net at head height (rays nearly parallel) a real ball
+    looks noisy in metres; weighting makes the test measure misfit, not geometry. A ball in
+    flight fits to ~1-2 cm; arms, heads and legs do not."""
+    t = np.array([f[0] for f in frames], float) / fps
+    X = np.array([f[1] for f in frames], float)
+    w = np.sin(np.radians(np.array([f[3] for f in frames], float)))
+    out = []
+    for i in range(0, max(1, len(t) - win + 1)):
+        s = t[i:i + win] - t[i]
+        ww = w[i:i + win]
+        A = np.c_[np.ones_like(s), s]
+        res = []
+        for j in range(3):
+            y = X[i:i + win, j] + (0.5 * 9.81 * s ** 2 if j == 2 else 0.0)
+            p, *_ = np.linalg.lstsq(A * ww[:, None], y * ww, rcond=None)
+            res.append((y - A @ p) * ww)
+        out.append(np.sqrt(np.mean(np.concatenate(res) ** 2)))
+    return float(np.median(out))
+
+
 def evaluate_pair(ta, tb, cams, fa, offset, max_reproj, min_frames=MIN_PAIR_FRAMES):
     """Triangulate a pair of tracklets on their common frames. Returns stats dict or None."""
     ks = [k for k in range(ta.f["k0"], ta.f["k1"] + 1)
@@ -141,13 +172,15 @@ def evaluate_pair(ta, tb, cams, fa, offset, max_reproj, min_frames=MIN_PAIR_FRAM
         depth = (cams[0].R @ Xk + cams[0].t)[2]
         ratios.append(ta.radius_at(k) / (cams[0].K[0, 0] * BALL_R / depth))
     size = float(np.median(ratios))
-    return dict(frames=good, n=len(good), reproj=float(np.median([g[2] for g in good])), speed=speed,
+    ballistic = ballistic_rms(good, fa)
+    return dict(ballistic=ballistic, frames=good, n=len(good), reproj=float(np.median([g[2] for g in good])), speed=speed,
                 size=size, colour=0.5 * (ta.f["colour"] + tb.f["colour"]), k0=int(K[0]), k1=int(K[-1]))
 
 
 def match_pairs(tracks_a, tracks_b, cams, fa, offset, max_reproj, min_frames=MIN_PAIR_FRAMES, verbose=True):
     """Accepted (track A, track B, stats) pairs, best first, one ball at a time."""
-    cands = []
+    cands, fails, near = [], dict(speed=0, size=0, colour=0, gravity=0), []
+    n_agree = 0
     for ta in tracks_a:
         for tb in tracks_b:
             if tb.t1 < ta.t0 + offset - 0.05 or tb.t0 > ta.t1 + offset + 0.05:
@@ -155,7 +188,16 @@ def match_pairs(tracks_a, tracks_b, cams, fa, offset, max_reproj, min_frames=MIN
             st = evaluate_pair(ta, tb, cams, fa, offset, max_reproj, min_frames)
             if st is None:
                 continue
-            if st["speed"] < MIN_SPEED or not SIZE_RATIO[0] <= st["size"] <= SIZE_RATIO[1]:
+            n_agree += 1
+            why = [k for k, bad in (("speed", st["speed"] < MIN_SPEED),
+                                    ("size", not SIZE_RATIO[0] <= st["size"] <= SIZE_RATIO[1]),
+                                    ("colour", st["colour"] < MIN_COLOUR),
+                                    ("gravity", st["ballistic"] > MAX_BALLISTIC)) if bad]
+            for k in why:
+                fails[k] += 1
+            if why:
+                if len(why) == 1 and st["n"] >= 2 * min_frames:   # long, failed one rule: maybe the ball
+                    near.append((ta, st, why[0]))
                 continue
             st["score"] = st["n"] * (0.5 + st["colour"]) * (1 - 0.5 * min(ta.f["person"], tb.f["person"]))
             cands.append((ta, tb, st))
@@ -171,7 +213,15 @@ def match_pairs(tracks_a, tracks_b, cams, fa, offset, max_reproj, min_frames=MIN
         accepted.append((ta, tb, st))
         taken |= frames
     if verbose:
-        print(f"Cross-camera matching: {len(cands)} tracklet pairs consistent in 3D, {len(accepted)} accepted")
+        print(f"Cross-camera matching: {n_agree} tracklet pairs agree in 3D; rejected by speed {fails['speed']}, "
+              f"size {fails['size']}, colour {fails['colour']}, gravity {fails['gravity']} (a pair can fail several); "
+              f"{len(cands)} passed, {len(accepted)} accepted")
+        if near:
+            print("  Long pairs rejected by one rule only (if these are the ball, that rule is too strict):")
+            for ta, st, why in sorted(near, key=lambda x: -x[1]["n"])[:12]:
+                print(f"    t {st['k0'] / fa:7.2f}-{st['k1'] / fa:7.2f} s  {st['n']:3d} frames  failed {why:<7}  "
+                      f"speed {st['speed']:4.1f} m/s  size {st['size']:4.2f}  colour {st['colour']:4.2f}  "
+                      f"gravity {100 * st['ballistic']:4.1f} cm")
     return accepted
 
 
@@ -204,13 +254,17 @@ def refine_offset(accepted, cams, fa, offset, window):
 
 
 def build_rows(accepted, cams, fa, ia0, n_frames, offset, max_reproj):
-    """One row per camera-A frame with the ball's 2D positions and 3D position."""
+    """One row per camera-A frame with the ball's 2D positions and 3D position.
+
+    Pairs are written best first, and a frame already given to a better pair is never
+    overwritten. Pass 1 writes each pair's matched span (both cameras); pass 2 then fills
+    still-empty frames with the parts of the tracklets seen by one camera only."""
     rows = [dict(t_a=(ia0 + j) / fa, a=None, a_state="lost", b=None, b_measured=False, X=None,
                  reproj=None, angle=None, status="none") for j in range(n_frames)]
     for ta, tb, st in accepted:
-        for k in range(ta.f["k0"], ta.f["k1"] + 1):
+        for k in range(st["k0"], st["k1"] + 1):
             j = k - ia0
-            if not 0 <= j < n_frames:
+            if not 0 <= j < n_frames or rows[j]["status"] != "none":
                 continue
             r = rows[j]
             ua, ub = ta.at_frame(k), tb.at_time(k / fa + offset)
@@ -227,12 +281,16 @@ def build_rows(accepted, cams, fa, ia0, n_frames, offset, max_reproj):
                     r["status"] = "inconsistent"
             elif ua is not None or ub is not None:
                 r["status"] = "one camera"
-        # camera B's part of the track outside camera A's (B only)
+    for ta, tb, st in accepted:
         for j, r in enumerate(rows):
-            if r["b"] is None and tb.t0 <= r["t_a"] + offset <= tb.t1:
-                ub = tb.at_time(r["t_a"] + offset)
-                if ub is not None and r["a"] is None:
-                    r.update(b=ub, b_measured=True, status="one camera")
+            if r["status"] != "none":
+                continue
+            ua = ta.at_frame(ia0 + j)
+            ub = tb.at_time(r["t_a"] + offset) if tb.t0 <= r["t_a"] + offset <= tb.t1 else None
+            if ua is not None:
+                r.update(a=ua, a_state="measured", status="one camera")
+            elif ub is not None:
+                r.update(b=ub, b_measured=True, status="one camera")
     return rows
 
 
@@ -408,6 +466,11 @@ def main():
                         int(r["b_measured"]), fmt(X[0], 3), fmt(X[1], 3), fmt(X[2], 3), fmt(r["reproj"], 1),
                         fmt(r["angle"], 1), r["status"]])
     save_plot(rows, out_dir / f"{stem}_trajectory.png", offset)
+    # run details for line_calls.py (which frames to show, which offset was used)
+    (out_dir / f"{stem}.json").write_text(json.dumps(dict(
+        video_a=args.video_a, video_b=args.video_b, calib_a=args.calib_a, calib_b=args.calib_b,
+        sync=args.sync, offset_s=offset, start=args.start, duration=args.duration,
+        csv=str(out_dir / f"{stem}.csv")), indent=1))
 
     # 4. render: decode both videos again, B at the nearest frame to t_A + offset
     ca, cb = cv2.VideoCapture(args.video_a), cv2.VideoCapture(args.video_b)
