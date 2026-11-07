@@ -20,6 +20,8 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 | Bounce detection and in/out calls | Done: 3/3 correct on synthetic serves (error across the line 0.5-6.9 cm) |
 | Synthetic test with exact ground truth | Done: 3D error median 1.6 cm, sync refined to 1 ms |
 | Touches, who touched it, 3-touch / double-contact rules on the 3D track | Done: 7/9 contacts attributed on a real rally; not yet scored against ground truth |
+| Live landing prediction during the flight | Done: 2-10 cm on synthetic serves; 0.5-2 m on real footage, calls right |
+| One-command pipeline and combined video | Done: `run_pipeline.py`, `render_full.py` |
 | Single-camera pipeline: players, touches, 3-touch rule (`volleyball_cv_inout/`) | Done (see its own README) |
 
 ---
@@ -432,6 +434,57 @@ constructed sequences: 4 hits, the same player twice, a block followed by 3 hits
 blocker, and a hidden stretch that must not raise a foul). Not yet measured against hand-labelled
 contacts; contacts during unseen stretches (e.g. the serve at about 48 s) are missed.
 
+### 13. Predicting the landing spot while the ball is in the air
+```
+python scripts/landing_predict.py results/ball/game2_A_game2_B_sdr_ball_from30.json
+```
+Adapted from `landing.py` in `volleyball_cv_inout/`. With one camera, that needs a 3D gravity fit
+for *when* the ball lands, a pixel extrapolation for *where*, and a focal length tuned from physics.
+With two cameras the 3D position is measured, so one fit gives both.
+1. Flight = 3D samples since the last contact before each floor bounce (step 12), or since the
+   track's last gap if no contact was seen.
+2. At every sample during the flight, a fixed-gravity arc is fitted to the samples seen **so far**.
+   Where it comes down to z = ball radius is the predicted landing time and spot, with an
+   uncertainty from the fit (plus 5 cm calibration error).
+3. The predicted spot is called IN/OUT with the same rule as step 10.
+4. Scored against the measured contact point after 25 / 50 / 75 % of the flight time.
+
+Outputs in `results/landing/`: `_landing.csv` (per bounce: error and call at 25/50/75 %),
+`_landing_pred.csv` (every prediction, with the arc, for the video) and `_landing.png` (error
+against the share of the flight seen).
+
+| Clip | Bounce | Flight | Error after 25 % / 50 % / 75 % | Call |
+|---|---|---|---|---|
+| Synthetic | serve IN | 0.95 s | 2 / 7 / 6 cm | right at every stage |
+| Synthetic | serve OUT (23 cm out) | 0.95 s | 8 / 10 / 9 cm | right at every stage |
+| Game 2, 30-60 s | 37.05 s, IN | 0.63 s | 235 / 48 / 66 cm | right at every stage |
+| Game 2, 130-160 s | 150.58 s, IN | 1.04 s | 121 / 79 / 45 cm | right at every stage |
+| Game 2, 130-160 s | 149.69 s, IN | 2.27 s | 226 / 217 / 208 cm | right at every stage |
+
+On real footage the 3D noise (5-13 cm per sample) and gaps make early predictions metres off.
+The model has no air drag, so long flights land shorter than predicted. Every call was still
+right, but all of these landed well inside the court, so close calls are untested.
+
+### 14. Everything in one command and one video
+```
+python scripts/run_pipeline.py --start 30 --duration 30
+```
+Runs players (step 7), ball 3D (9), line calls (10), touches and rules (12), landing prediction (13),
+then `render_full.py`. Each step is skipped if its output exists; `--redo touches` re-runs from that
+step on, and `--redo all` re-runs everything. Game 2 files are the defaults; other footage uses
+`--video-a/--video-b/--calib-a/--calib-b/--sync` (calibrate and sync first, steps 2-5).
+
+`results/full/<A>_<B>_full_from<start>.mp4` shows both synced cameras and a court map:
+- court lines and players with track IDs (orange = camera A's half, green = B's, drawn from their
+  court positions)
+- the ball (2D detection, 3D point and its floor shadow)
+- each contact with team, hit number and player ("A2 #5")
+- the predicted path and landing spot ("pred IN") while the ball is in the air
+- the measured bounce call
+- a top bar with the rally, "A hit 2/3", fouls, and the point after a bounce
+
+On 30-60 s with players and ball already done: about 2.5 min (touches 87 s, render 56 s).
+
 ### Utility: click and plot points
 ```
 python scripts/pick_points.py data/game2_A.mp4 --time 60 --names ball landing
@@ -502,6 +555,8 @@ the earlier version of `inspect_video.py`. The current version names frames `tSS
 3. Hand-label real landing spots with `pick_points.py` to measure in/out accuracy on real rallies.
 4. Refit both calibrations with the line-centre convention (`calibrate_camera.py --points-json`).
 5. Compare the ball detector with TrackNetV3 on the same clips.
+6. Hand-label contacts (time and player) on a few rallies to score `touches_rules.py`.
+7. Add air drag to the landing prediction, and test it on bounces near the lines.
 
 ## Single-camera pipeline (`volleyball_cv_inout/volleyball_cv/`)
 A separate, one-camera pipeline for players (YOLO11-pose, ByteTrack, court minimap), ball
