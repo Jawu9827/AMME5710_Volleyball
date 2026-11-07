@@ -19,6 +19,7 @@ AMME5710 Computer Vision and Image Processing, Major Project 2026, University of
 | Ball tracking in 3D (two cameras) | Done: 77% of frames on an 8 s real rally, no false balls |
 | Bounce detection and in/out calls | Done: 3/3 correct on synthetic serves (error across the line 0.5-6.9 cm) |
 | Synthetic test with exact ground truth | Done: 3D error median 1.6 cm, sync refined to 1 ms |
+| Touches, who touched it, 3-touch / double-contact rules on the 3D track | Done: 7/9 contacts attributed on a real rally; not yet scored against ground truth |
 | Single-camera pipeline: players, touches, 3-touch rule (`volleyball_cv_inout/`) | Done (see its own README) |
 
 ---
@@ -49,7 +50,8 @@ pip install -r requirements.txt
 - `imageio-ffmpeg` provides ffmpeg (with the `zscale` filter needed for HDR conversion), so
   ffmpeg does not need to be installed separately.
 - `ultralytics` provides YOLO for player detection. It installs PyTorch (large; the CPU
-  version is fine). Model weights (`yolo11n.pt`, `yolo11s.pt`) download automatically on
+  version is fine). Model weights (`yolo11n.pt`, `yolo11s.pt`, and `yolo11m-pose.pt` for
+  `touches_rules.py`) download automatically on
   first use and are ignored by Git (`*.pt`).
 - Use `opencv-contrib-python`, not `opencv-python`: OpenCV 5 moved the HOG people detector
   to the contrib package. Don't install both (they share files). If you already have
@@ -376,6 +378,59 @@ python ../../scripts/synthetic_score.py results/ball/A_B_ball_from0.3.csv result
 Not tested by it: calibration error (cameras are exact), audio sync, motion blur, 60 fps / HDR,
 uneven frame timing. The ball image is `data/annotations/ball_patch.png` (a crop of the real
 ball; a drawn ball is used if it is missing).
+
+### 12. Touches, the 3-touch rule and double contacts
+```
+python scripts/touches_rules.py results/ball/game2_A_game2_B_sdr_ball_from30.json --players results/players/game2_A_game2_B_sdr_players_from30.csv
+```
+Adapted from the single-camera pipeline in `volleyball_cv_inout/` (its `ball_events.py`,
+`touches.py` and `rules.py`), but on the two-camera 3D ball track. `--players` (the
+`players_on_court.py` CSV for the same window) is optional; it gives track IDs, which are needed for
+double contacts.
+1. **Contacts:** a ball in free flight follows a fixed-gravity arc. At each 3D sample, arcs fitted to
+   the 0.3 s before and the 0.3 s after are compared. Their velocity change is about 0 in flight and
+   several m/s at a contact (threshold 4 m/s). The contact time and point are where the two arcs meet.
+   Across a gap in the 3D track, the arcs either side are extrapolated: if they join smoothly there was
+   no contact, if they meet with a kink the contact is placed there, and if they don't meet the gap is
+   marked as a possible unseen contact. Floor bounces (and their IN/OUT call) come from `line_calls.py`.
+   Contacts with the ball centre below 0.2 m are the ball on the floor.
+2. **Who touched it:** the 3D contact point is projected into both cameras at the frames before, at
+   and after the contact. YOLO11m-pose runs on a crop of about 4 x 5 m around it, so far players are
+   seen at a usable size. For each person: the gap from the ball's surface to the hands (wrist + 0.35
+   x forearm), forearms and head, in metres at the ball's distance. People whose feet (ankles, else
+   box bottom) are more than 1.8 m from the ball horizontally are rejected; this removes players
+   behind the ball along the camera ray. The closest person within 0.3 m touched it.
+   Team = side of the net where they stand (A = camera A's half, y > 9).
+3. **Rules (FIVB), per rally:** a rally starts at a serve (first contact with the ball behind an end
+   line) or the first contact after a dead ball, and ends at a floor bounce or when the ball is unseen
+   for 2 s. Possession changes when the other team touches the ball or the 3D track crosses the net.
+   A block (toucher within 1 m of the net, both wrists above the head, ball within 0.3 m of the net
+   top or higher, arriving from the other side) doesn't count as a hit and the blocker may touch
+   again. `FOUR_TOUCHES` = a 4th team hit; `DOUBLE_CONTACT` = the same track ID twice in a row (not
+   after a block). A count is only **certain** if the ball was seen (3D or either camera) with no gap
+   over 0.5 s since the previous contact; otherwise no foul is flagged. A floor bounce IN gives the
+   point to the team on the other side; OUT gives it to the opponents of the last team to touch it.
+
+Outputs in `results/touches/`: `_touches.csv` (one row per contact or bounce), `_touches.png`
+(ball height with every event labelled, plus contact points on the court) and `_evidence.jpg` (the
+crop used for each contact, with the skeleton and the ball).
+
+What changed from `volleyball_cv_inout/`: contacts are found from 3D velocity changes rather than
+2D pixel kinks; the ball's position at each frame comes from the arcs (known where the 2D detector
+missed it); the toucher has to be within reach in court metres, not just close in the image;
+possession uses real net crossings; YOLO11-pose replaces RTMPose (no extra install).
+
+For contacts at 2 m or higher the toucher may be jumping, and a jumping player's feet map too far
+from the camera (step 7). So their feet are allowed anywhere on the camera ray from the floor up to
+0.6 m. If that leaves the side of the net ambiguous, the team is guessed from where the ball came
+from, flagged `TEAM_GUESSED`, and the count is not trusted.
+
+**Result (Game 2, 30-60 s, 3D on 46% of frames):** 9 contacts and 1 floor bounce found, 7 contacts
+attributed. The first rally reads B serve, A hit 1, A hit 2, an unattributed contact at the net,
+floor IN on A's side, point to B. No fouls in this footage (the rule logic was checked on
+constructed sequences: 4 hits, the same player twice, a block followed by 3 hits and a touch by the
+blocker, and a hidden stretch that must not raise a foul). Not yet measured against hand-labelled
+contacts; contacts during unseen stretches (e.g. the serve at about 48 s) are missed.
 
 ### Utility: click and plot points
 ```
