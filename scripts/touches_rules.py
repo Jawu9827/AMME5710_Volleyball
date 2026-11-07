@@ -219,7 +219,7 @@ def feet_pixel(k, s, box, crop_box, img_shape):
 def foot_line(cam, uv, h_max):
     """Court (x, y) of the feet if they are on the floor (p0) and if they are h_max up (p1): the
     point on the camera ray through the feet pixel at that height. A jumping player's feet map
-    too far from the camera through the floor homography (README section 7)."""
+    too far from the camera through the floor homography (README step 6)."""
     d = cam.ray(uv)
     if d[2] >= -1e-6:
         return None, None                       # ray doesn't reach the floor

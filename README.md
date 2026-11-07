@@ -1,58 +1,104 @@
 # AMME5710 Volleyball Line Judge
 
-A low-cost computer vision line judge for amateur indoor volleyball: two phones on tripods
-behind the end lines, no calibration target, automatic in/out calls.
+A low-cost computer vision referee assistant for amateur indoor volleyball. Two phones on tripods,
+one behind each end line, record the match. From those two videos the system finds the court,
+syncs the cameras by sound, tracks the players and the ball in 3D, calls each bounce IN or OUT,
+predicts the landing spot while the ball is still in the air, works out who touched the ball, and
+checks the 3-touch and double-contact rules. No calibration target and no learned ball detector
+are used.
 
 AMME5710 Computer Vision and Image Processing, Major Project 2026, University of Sydney.
 
-## Status
+![Full pipeline on a real rally](docs/media/demo.gif)
 
-| Component | Status |
-|---|---|
-| Court detection on broadcast footage (free-zone boundary) | Done: 5.8 cm mean error, runs live |
-| Game 2 footage: HDR to SDR conversion | Done |
-| Game 2: automatic yellow-line detection | Done (both cameras) |
-| Game 2: camera calibration | Done: camera A 6.3 cm, camera B 2.8 cm (held-out line error) |
-| Game 2: audio sync between cameras | Done: offset +9.71 s, 6/8 chunks agree |
-| Game 2: synced two-camera court view | Done |
-| Player detection and top-down court map | Done: YOLO11n, F1 0.93, median position error 0.25 m |
-| Ball tracking in 3D (two cameras) | Done: 77% of frames on an 8 s real rally, no false balls |
-| Bounce detection and in/out calls | Done: 3/3 correct on synthetic serves (error across the line 0.5-6.9 cm) |
-| Synthetic test with exact ground truth | Done: 3D error median 1.6 cm, sync refined to 1 ms |
-| Touches, who touched it, 3-touch / double-contact rules on the 3D track | Done: 7/9 contacts attributed on a real rally; not yet scored against ground truth |
-| Live landing prediction during the flight | Done: 2-10 cm on synthetic serves; 0.5-2 m on real footage, calls right |
-| One-command pipeline and combined video | Done: `run_pipeline.py`, `render_full.py` |
+*Both synced cameras and a top-down court map. Orange = camera A's half, green = camera B's. The
+top bar shows the rally and hit count; contacts are labelled with team, hit number and player
+("A2 #5"); the dashed line is the predicted flight and "pred IN" the predicted landing; the dot
+at the bounce is the measured call.*
+
+**Full 2-minute demo video:** [docs/media/full_pipeline_30to150s.mp4](docs/media/full_pipeline_30to150s.mp4)
+(Game 2, 30-150 s, every stage running together).
+
+---
+
+## Contents
+1. [How it works](#how-it-works)
+2. [Results](#results)
+3. [Quick start](#quick-start)
+4. [Setup](#setup)
+5. [Data and coordinate frame](#data-and-coordinate-frame)
+6. [Pipeline, step by step](#pipeline-step-by-step)
+7. [Synthetic test with exact ground truth](#synthetic-test-with-exact-ground-truth)
+8. [Earlier work: court detection on broadcast footage](#earlier-work-court-detection-on-broadcast-footage)
+9. [Limitations and next steps](#limitations-and-next-steps)
+10. [Repository layout](#repository-layout)
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    V[Two phone videos] --> H[HDR to SDR]
+    H --> L[Yellow line detection]
+    L --> C[Camera calibration<br/>homography + lens k1<br/>+ 3D camera model]
+    V --> S[Audio sync]
+    C --> P[Players<br/>YOLO11n, court positions,<br/>two-camera tracking]
+    C --> B[Ball in 3D<br/>motion candidates in each camera,<br/>cross-camera matching, triangulation]
+    S --> P
+    S --> B
+    B --> LC[Bounces and<br/>IN / OUT calls]
+    B --> T[Contacts, who touched it,<br/>3-touch / double-contact rules]
+    P --> T
+    LC --> T
+    T --> LP[Landing prediction<br/>during the flight]
+    LC --> LP
+    P --> R[Combined video]
+    B --> R
+    T --> R
+    LP --> R
+```
+
+The key idea is that **the second camera replaces a learned detector**. Each camera alone finds
+many moving blobs; only the real ball gives rays from both cameras that meet in 3D, follow
+gravity, and have the right size for a 21 cm ball at that distance. Once the ball is in 3D, a
+contact is a sudden change in velocity between two gravity arcs, a bounce is where the arcs meet
+the floor, and a landing prediction is the arc fitted so far extended to the floor.
+
+---
+
+## Results
+
+All real-footage numbers are from "Game 2" (two iPhones, 1920x1080; camera A at 29.97 fps, camera B at 59.9 fps).
+
+| Stage | Result | How it was measured |
+|---|---|---|
+| Court lines and calibration | 6.3 cm (camera A), 2.8 cm (camera B) | Each court line left out of the fit in turn and checked in centimetres |
+| Audio sync | +9.71 s offset, 6 of 8 chunks agree; refined to 1 ms on synthetic | Independent 30 s chunks voting; synthetic clip with a known offset |
+| Player detection | F1 0.93, median position error 0.25 m | 105 hand-clicked players at 10 moments, YOLO11n with fitted foot correction |
+| Ball in 3D | 1.6-2.6 cm median 3D error, no false 3D points (synthetic); real play: 3D on 1180 of 3597 frames (33 %) over 2 minutes, which includes the dead time between rallies; median reprojection error 1.4 px | Synthetic ground truth; real coverage |
+| Line calls | 2 of 3 synthetic serves found and called correctly (0.4 and 6.6 cm across the line); the 3rd (2 cm from the line) was missed by the ball tracker | Synthetic ground truth |
+| Contacts and who touched them | 25 contacts and 9 bounces in 2 minutes; 18 contacts attributed to a player (13 with a confident team, 5 `TEAM_GUESSED`), 7 not attributed | Real footage, checked visually from the evidence images; not yet scored against hand labels |
+| Landing prediction | 2-10 cm after 25-75 % of the flight (synthetic); 0.5-2 m on real footage, every call right | Synthetic ground truth; real bounces measured by the system itself |
+| Rules (4 touches, double contact, block) | Correct on constructed sequences | No fouls happened in the footage |
+| Broadcast court detection (earlier work) | 5.8 cm mean error, 11-15 ms per frame | 15 hand-labelled frames across zoom levels |
 
 ---
 
 ## Quick start
 
-After setup (below), with the Game 2 videos in `data/`:
+After [setup](#setup), with the Game 2 videos in `data/`:
 ```
-python scripts/run_pipeline.py --start 30 --duration 30
+python scripts/run_pipeline.py --start 30 --duration 120
 ```
-This runs players, 3D ball, line calls, touches and rules, and landing prediction on 30-60 s of
-the match, and writes one video with everything: `results/full/game2_A_game2_B_sdr_full_from30.mp4`.
-Calibrations and the audio sync are already in `data/annotations/`. Steps 1-5 below only need
-re-running for new footage.
+This runs every analysis step on 30-150 s of the match and writes one video with everything:
+`results/full/game2_A_game2_B_sdr_full_from30.mp4`. The calibrations and audio sync are already
+in `data/annotations/`; steps 1-5 below are only needed for new footage. Each step is skipped if
+its output exists; `--redo touches` re-runs from that step on, `--redo all` re-runs everything.
 
-| Script | Step | Purpose |
-|---|---|---|
-| `inspect_video.py` | 1 | Video properties, dropped frames, HDR check, frame export |
-| `hdr_to_sdr.py` | 2 | iPhone HDR (HLG) to normal video |
-| `detect_court_lines.py` | 3 | Automatic yellow court-line detection |
-| `calibrate_camera.py` | 4 | Court calibration (homography + lens distortion), accuracy, tripod check |
-| `sync_videos.py` | 5 | Audio sync between the cameras |
-| `players_on_court.py` | 7 | Player detection, court positions, tracking |
-| `eval_players.py` | 8 | Player detection accuracy against hand clicks |
-| `ball_detect.py`, `camera_3d.py`, `ball_two_cameras.py` | 9 | Ball candidates, camera models, 3D ball |
-| `line_calls.py` | 10 | Bounces and IN/OUT calls |
-| `synthetic_render.py`, `synthetic_score.py` | 11 | Synthetic clip with exact ground truth |
-| `touches_rules.py` | 12 | Contacts, who touched it, 3-touch / double-contact rules |
-| `landing_predict.py` | 13 | Landing prediction during the flight |
-| `run_pipeline.py`, `render_full.py` | 14 | Everything in one command and one video |
-| `pick_points.py` | utility | Click and plot points (hand labels) |
-| `court_detect.py`, `court_live.py`, `annotate_court.py`, `court_batch_eval.py`, `manual_homography.py`, `court_lines.py` | earlier work | Court detection on broadcast footage |
+Time on our development PC (CPU only) for 2 minutes of video: about 70 minutes (players 17 min, 3D ball 47 min, line calls 12 s, touches 2.6 min, landing prediction 4 s, video 2.2 min).
+
+---
 
 ## Setup
 
@@ -75,315 +121,290 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` lists `numpy`, `scipy`, `opencv-contrib-python`, `matplotlib`, `imageio-ffmpeg`
-and `ultralytics`.
-- `imageio-ffmpeg` provides ffmpeg (with the `zscale` filter needed for HDR conversion), so
-  ffmpeg does not need to be installed separately.
-- `ultralytics` provides YOLO for player detection. It installs PyTorch (large; the CPU
-  version is fine). Model weights (`yolo11n.pt`, `yolo11s.pt`, and `yolo11m-pose.pt` for
-  `touches_rules.py`) download automatically on
-  first use and are ignored by Git (`*.pt`).
-- Use `opencv-contrib-python`, not `opencv-python`: OpenCV 5 moved the HOG people detector
-  to the contrib package. Don't install both (they share files). If you already have
-  `opencv-python`: `pip uninstall -y opencv-python`, then `pip install -r requirements.txt`.
+`requirements.txt`: `numpy`, `scipy`, `opencv-contrib-python`, `matplotlib`, `imageio-ffmpeg`,
+`ultralytics`.
+- `imageio-ffmpeg` provides ffmpeg (with the `zscale` filter needed for HDR conversion), so ffmpeg
+  doesn't need to be installed separately.
+- `ultralytics` provides YOLO and installs PyTorch (the CPU version is fine). The weights
+  (`yolo11n.pt` for players and ball masking, `yolo11m-pose.pt` for touches) download
+  automatically on first use and are ignored by Git.
+- Use `opencv-contrib-python`, not `opencv-python`: OpenCV 5 moved the HOG people detector to the
+  contrib package. Don't install both. If you have `opencv-python`:
+  `pip uninstall -y opencv-python`, then `pip install -r requirements.txt`.
 
 Run all commands from the repo root with the environment activated.
 
-## Data
+---
 
-Videos are **not** in Git: they're too large, and GitHub rejects files over 100 MB.
+## Data and coordinate frame
+
+Videos are **not** in Git (GitHub rejects files over 100 MB).
 
 | Folder | In Git? | Contents |
 |---|---|---|
-| `data/` | No | Videos, e.g. `data/game2_A.mp4`, `data/game2_B_sdr.mp4` |
-| `data/annotations/` | **Yes** | Calibrations, sync offsets, hand-clicked ground truth, fitted foot offset (small JSON files) |
-| `frames/` | No | Frames saved by `inspect_video.py` |
-| `results/` | No | Debug images, overlays, ball / player / full-pipeline videos, evaluation output |
+| `data/` | No | Videos: `data/game2_A.mp4`, `data/game2_B_sdr.mp4` |
+| `data/annotations/` | **Yes** | Calibrations, sync offset, hand-clicked ground truth, fitted foot offset, ball image patch |
+| `docs/media/` | **Yes** | Figures and the demo video used in this README |
+| `frames/`, `results/` | No | Frames, debug images, videos and CSVs written by the scripts |
 
-### Game 2 footage (current)
-
-Two iPhones on tripods, one behind each end line of an indoor court with **yellow
-volleyball lines on a blue floor**, recorded at 1920x1080, about 29.97 fps.
+**Game 2:** two iPhones on tripods, one behind each end line of an indoor court with yellow
+volleyball lines on a blue floor, 1920x1080, camera A at 29.97 fps and camera B at 59.9 fps.
 
 | Camera | File | Position (`--end`) | Notes |
 |---|---|---|---|
 | A | `data/game2_A.mp4` | behind the y = 18 end line (`near`) | normal (SDR) video |
-| B | `data/game2_B_sdr.mp4` | behind the y = 0 end line (`far`) | recorded in HDR; converted with `hdr_to_sdr.py` |
+| B | `data/game2_B_sdr.mp4` | behind the y = 0 end line (`far`) | recorded in HDR, converted with `hdr_to_sdr.py` |
 
-Court frame (metres), shared by both cameras: `x` 0–9 across the width, `y` 0–18 along the
-length. Far end line `y = 0`, far attack line `y = 6`, centre line (net) `y = 9`,
-near attack line `y = 12`, near end line `y = 18`. Each camera judges the half nearest to
-it: camera A `y = 9..18`, camera B `y = 0..9`.
+**Court frame (metres), shared by both cameras:** `x` 0-9 across, `y` 0-18 along, `z` up. End
+lines at `y = 0` and `y = 18`, attack lines at 6 and 12, net at `y = 9`. Each camera judges the
+half nearest to it: A `y = 9..18`, B `y = 0..9`. Team "A" means the team on camera A's half.
 
-For future recordings: turn **HDR Video off** on both phones
-(Settings > Camera > Record Video), and record a clap at the start of filming.
+For future recordings: turn **HDR Video off** on both phones and record a clap at the start.
 
 ---
 
-## Two-camera pipeline (Game 2)
+## Pipeline, step by step
 
 ### 1. Inspect each video
 ```
 python scripts/inspect_video.py data/game2_A.mp4 --every 30
 ```
-Prints resolution, frame rate, bitrate and codec, checks for dropped or doubled frames, and
-flags HDR video. Saves exact frames (PNG, via ffmpeg) and a `contact_sheet.jpg` to
-`frames/game2_A/`. Use `--times 12.5 60` for specific times.
+Prints resolution, frame rate, bitrate and codec, checks for dropped or doubled frames, flags HDR
+video, and saves exact frames and a contact sheet to `frames/game2_A/`.
 
 ### 2. Convert HDR video to normal colours
 ```
 python scripts/hdr_to_sdr.py data/IMG_4857.MOV data/game2_B_sdr.mp4 --width 1920
 ```
-iPhone HDR (HLG, BT.2020) looks washed out when read as normal video: our floor saturation
-dropped from about 65 to 22. The script converts properly: HLG to linear light (reference
-white 203 nits, ITU-R BT.2408), BT.2020 to BT.709 primaries, Mobius tone mapping, H.264
-CRF 18, audio copied. A round-trip check (SDR to HLG and back) recovered the floor colour to
-within 2 saturation levels, with a mean pixel difference of 3/255 (13/255 when read naively).
+iPhone HDR (HLG, BT.2020) looks washed out when read as normal video: the floor's saturation
+dropped from about 65 to 22. The script converts properly: HLG to linear light (reference white
+203 nits, ITU-R BT.2408), BT.2020 to BT.709 primaries, Mobius tone mapping. A round trip (SDR to
+HLG and back) recovered the floor colour to within 2 saturation levels (mean pixel difference
+3/255, against 13/255 when read naively). `--start 60 --duration 10` makes a quick test with a
+before/after image.
 
-- Use the original `.MOV` from the phone (10-bit) if possible.
-- `--width 1920` keeps a 4K original the same size as the other camera.
-- `--white 350` gives a darker result (camera B came out about 30% brighter than A at 203).
-- Test first with `--start 60 --duration 10`; it saves a before/after `_compare.jpg`.
-
-### 3. Detect the yellow court lines automatically
+### 3. Detect the yellow court lines
 ```
 python scripts/detect_court_lines.py data/game2_A.mp4 --time 60
 ```
-1. **Colour model:** the floor colour is measured at the bottom centre of the frame, and
-   saturation/brightness thresholds are set relative to it, so the same code works on normal
-   and converted HDR footage. Yellow is hue 22–42, which excludes the orange lines of other
-   sports (hue 9–20).
-2. **Floor mask:** pixels near the floor's hue. Thin lines from other sports are bridged by a
-   morphological closing first, then every large floor region is kept.
-3. **Line mask:** yellow pixels on the floor; compact blobs (skin, shoes) are removed by shape.
-4. **Hough transform** gives segments, grouped by angle into the near end line, left
-   sideline and right sideline.
-5. **RANSAC line fit** for each group (players on the line are outliers), least-squares
-   refit on the inliers, and the near corners as line intersections.
+1. **Colour model** measured from the floor at the bottom of the frame, with thresholds relative to
+   it, so the same code works on normal and converted HDR footage. Yellow is hue 22-42, which
+   excludes the orange lines of other sports (hue 9-20).
+2. **Floor mask** (thin lines of other sports bridged by a morphological closing) and **line mask**
+   (yellow pixels on the floor, compact blobs such as skin and shoes removed by shape).
+3. **Hough transform**, segments grouped by angle into the end line and the two sidelines.
+4. **RANSAC line fit** per group (players on the line are outliers), least-squares refit, corners as
+   line intersections. The detected line pixels lie within 1-2 px of straight lines.
 
-Saves `results/court_lines/<video>_t60.json` (lines, corners, and sample points taken from
-the actual line pixels) and `_debug.jpg` (mask and segments above, fitted lines below).
-On our footage the detected line pixels lie within about 1–2 px of straight lines.
+![Line detection: masks and segments above, fitted lines below](docs/media/court_lines_A.jpg)
 
 ### 4. Calibrate each camera
 ```
 python scripts/calibrate_camera.py data/game2_A.mp4 --camera A --end near --time 60 --auto-lines results/court_lines/game2_A_t60.json
 python scripts/calibrate_camera.py data/game2_B_sdr.mp4 --camera B --end far --time 24 --auto-lines results/court_lines/game2_B_sdr_t24.json
 ```
-The detected lines and corners are added automatically. You then click intersections the
-detector can't find, such as the attack-line ends and the far court. Names are always from
-the camera's own point of view ("near-left" = nearest corner on its left), and `--end` maps
-them into the shared court frame.
+The detected lines and corners are added automatically; the user clicks the intersections the
+detector can't find (attack-line ends, far court) with a 5x magnifier.
+- **Fit:** homography (court to image) by robust least squares on the intersections and on the
+  distances of line points from their lines, plus a radial lens term `k1`, kept only if it lowers
+  the held-out error.
+- **Accuracy:** each line is left out of the fit in turn and its points are checked against where
+  the line really is, in centimetres on the court (conservative: about twice the true error in
+  simulation).
+- **Tripod check:** 40 frames through the video are compared with the calibration frame (phase
+  correlation of walls and ceiling); a shift over 2 px means the phone moved.
+- **3D camera model** (`camera_3d.py`): focal length, rotation and position recovered from the
+  homography (principal point at the image centre, square pixels). Checked by drawing the net and
+  2 m poles, which the floor calibration never saw.
 
-- **Clicking:** a 5x magnifier follows the mouse. `i/j/k/l` nudge the last click 1 px,
-  `s` skips a point, `u` undoes, `Enter` moves to the next stage. In the second stage you can
-  click extra points along any line (`n` next line, `b` back, `Enter` finish).
-- **Fit:** a homography (court to image) by robust least squares on the pixel distances of
-  the intersections and of the line points from their lines, plus an optional radial lens
-  distortion term `k1`. That term is kept only if it reduces the held-out error.
-- **Accuracy estimate:** each line is left out of the fit in turn, and its points are checked
-  against where the line really is, in centimetres on the court. This is conservative: in
-  simulation it was about twice the true error.
-- **Tripod check:** 40 frames across the video are compared with the calibration frame by
-  phase correlation of the walls and ceiling. A shift over 2 px means the phone moved.
-- **Refit without re-clicking:** `--points-json data/annotations/calib_B.json`. Leave a bad
-  click out with `--drop "centre line / right sideline (under net)"`.
+| | Accuracy estimate | Lens k1 | Camera position (x, y, height) | Tripod |
+|---|---|---|---|---|
+| Camera A | 6.3 cm | -0.021 | 4.6, 24.8, 1.50 m | stable throughout |
+| Camera B | 2.8 cm | -0.012 | 4.6, -6.5, 1.36 m | stable from about 7 s |
 
-Outputs: `data/annotations/calib_<camera>.json` (commit this), and in `results/calib/` the
-`_overlay.jpg` (court drawn on the calibration frame) and `_check.jpg` (court on frames
-through the video). Other scripts load a calibration with:
-```python
-from calibrate_camera import load_calibration
-cal = load_calibration("data/annotations/calib_A.json")
-court_xy = cal.image_to_court([[u, v]])      # pixels -> metres, for points on the floor
-```
+| Calibration overlay (camera A) | 3D model check: net and 2 m poles (camera A) |
+|---|---|
+| ![Calibration overlay](docs/media/calib_A_overlay.jpg) | ![Net and poles drawn from the 3D camera model](docs/media/camera3d_A_net.jpg) |
 
-**Results (Game 2):**
-
-| | Accuracy estimate | Lens correction k1 | Tripod |
-|---|---|---|---|
-| Camera A | 6.3 cm | -0.021 | stable for the whole video |
-| Camera B | 2.8 cm | -0.012 | stable from about 7 s onwards |
-
-The centre line is too dark to click reliably near the right-hand net post in both views,
-so that point is left out with `--drop`. Far-court points have large errors in centimetres
-(one pixel covers 15–20 cm beyond the net), which doesn't matter because the other camera
-judges that half.
-
-### 5. Sync the two cameras
+### 5. Sync the two cameras by sound
 ```
 python scripts/sync_videos.py data/game2_A.mp4 data/game2_B_sdr.mp4
 ```
-Both phones recorded the same whistles and ball contacts. Each soundtrack becomes a
-multi-band onset signal (rises in log energy in five frequency bands), and the two are
-cross-correlated, coarse to fine:
-1. Blurred signals at 100 Hz, so sounds reaching the phones up to about 60 ms apart (20 m
-   at 343 m/s) still line up.
-2. Refined at 1 ms within ±0.15 s of that answer.
+Both phones hear the same whistles and ball contacts. Each soundtrack becomes a multi-band onset
+signal (rises in log energy in five frequency bands), cross-correlated coarse to fine: blurred at
+100 Hz first (sounds reach the phones up to 60 ms apart), then refined at 1 ms. Each lag is scored
+as a z-score, and every 30 s chunk votes independently.
 
-Each correlation is scored as a z-score per lag, which treats short and long overlaps fairly.
-Every 30 s chunk of A votes independently for an offset. The result is "reliable" if most
-chunks agree; otherwise it falls back to the whole-recording match ("PROBABLE") if that peak
-is clear.
+**Result:** offset +9.71 s, 6 of 8 chunks agree, one clear peak. The ball step (9) refines it
+further to the millisecond.
 
-Outputs: `data/annotations/sync_<A>_<B>.json` (offset, `t_B = t_A + offset_s`),
-`results/sync/..._audio_diag.png` (correlation curve and chunk votes), and a side-by-side
-`_preview.mp4`.
+![Audio cross-correlation and chunk votes](docs/media/sync_audio.jpg)
 
-If it's unreliable: `--guess <seconds> --search 2` narrows the search, and
-`--offset <seconds>` sets the offset by hand.
-
-**Result (Game 2):** offset +9.71 s (camera B started about 9.7 s before camera A), with 6
-of 8 chunks agreeing and one clear correlation peak. Sound travel between the phones limits
-the accuracy to about ±1–2 frames, so confirm it on a serve contact.
-
-### 6. Synced views
-Both cameras side by side are drawn by `render_full.py` (step 14), with the court lines, players,
-ball, contacts and calls. For a synced view before the later steps exist, run step 7
-(`players_on_court.py`), which shows both synced cameras with the court and players.
-
-### 7. Player detection and court positions
+### 6. Player detection and court positions
 ```
-python scripts/players_on_court.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 30
+python scripts/players_on_court.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 120
 ```
-Both synced camera views with player boxes, plus a top-down court map with a dot and a short
-trail for each player, coloured by side of the net (orange = camera A's side, green = B's).
+1. **Detection:** YOLO11n (pretrained COCO `person`) on both cameras every 3rd frame (HOG + SVM
+   with `--detector hog` for comparison).
+2. **Foot point:** bottom centre of the box, raised by a fitted 5.3 % of the box height (step 7);
+   only the feet are on the floor, so only they map correctly through the floor homography.
+3. **Court position** in metres; people off the court (benches, spectators) are dropped.
+4. **Fusion:** each camera covers its own half; within 1 m of the net both are used and matching
+   detections are averaged.
+5. **Tracking in court coordinates:** constant velocity, Hungarian assignment, 1.5 m gate, 3 hits to
+   confirm a track.
 
-1. **Detection:** YOLO11n (pretrained COCO `person` class) on each camera, every 3rd frame
-   by default. `--detector hog` uses OpenCV's classical HOG + linear SVM people detector.
-2. **Foot point:** bottom centre of each box, raised by a fitted fraction of the box height
-   (see step 8). Only the feet touch the floor, so only they map correctly through the floor
-   homography. Boxes cut off by the image edge are skipped.
-3. **Court position:** foot point mapped to metres with that camera's calibration. People
-   well outside the court (benches, spectators, walls) are dropped and shown with grey boxes.
-4. **Two-camera fusion:** each camera covers its own half; within 1 m of the net both are
-   used, and matching detections (Hungarian assignment, within 1.5 m) are averaged.
-   Detections closer than 0.4 m are one person.
-5. **Tracking in court coordinates:** detections are matched to each track's predicted
-   position (constant velocity, Hungarian assignment, 1.5 m gate). A new track must be matched
-   3 times in a row before it is drawn, and a track is only drawn while it was seen in the
-   last 0.4 s, so false detections and lost players don't leave stray dots.
+![Players on court](docs/media/players_frame.jpg)
 
-Options: `--show` (watch while rendering), `--every 1` (detect on every frame, about 3x
-slower), `--model yolo11s.pt` (slightly more accurate, about 2.4x slower), `--device 0`
-(NVIDIA GPU), `--foot-frac 0` (no foot correction).
-
-Outputs in `results/players/`: the video, and a `.csv` of court positions per detection step
-(`time_s, track_id, x_m, y_m, side, camera, confidence`).
-
-**Limitations:** a jumping player's feet are off the floor, so they map further from the
-camera than they are; a player hidden behind another in the camera covering their half can
-drop out; track IDs can change after a long occlusion or when players cross.
-
-### 8. Player detection accuracy
-Ground truth: the floor point between the feet of every player, clicked by hand at 10 moments
-spread over the game (each camera's half, both cameras). About 10 minutes of clicking:
+### 7. Player detection accuracy
 ```
-python scripts/eval_players.py annotate data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --n 10
-```
-Left click adds a player, right click deletes the nearest click, `u` undoes, `Enter` moves to
-the next image, `s` skips, `q` saves and stops (run again to continue). `--redo` starts
-again; `--only 3 7` redoes single moments. Saved to `data/annotations/players_gt.json`
-(committed, so the evaluation can be rerun without clicking).
-
-Score the detectors (no clicking):
-```
+python scripts/eval_players.py annotate ...    # hand-click players at 10 moments (saved, committed)
 python scripts/eval_players.py evaluate
 ```
-- Detections and clicks are mapped to the court and kept if they are in that camera's half.
-  A detection is correct if it is within 1.0 m of a click (one-to-one, Hungarian matching;
-  change with `--gate`).
-- Reports precision, recall, F1, count error, median position error and time per image, per
-  camera and for the whole two-camera **system** (fused, single frames, no tracking).
-- **Foot correction:** the bottom of a detection box lies about 10 px below where the feet
-  touch the floor. At these shallow viewing angles that is 0.66-0.84 m too close to the
-  camera, with almost no sideways error. Each detector is scored with the raw box bottom and
-  with the foot point raised by the median offset (a fraction of the box height), fitted with
-  2-fold cross-validation (the value used on odd moments is fitted on even moments and vice
-  versa). The value fitted on all moments is saved to `data/annotations/foot_offset.json`
-  and used by `players_on_court.py`.
+105 hand-clicked players at 10 moments; a detection is correct within 1.0 m (one-to-one).
 
-Outputs in `results/eval/`: `players_eval_summary.csv`, `players_eval_frames.csv`, and
-images in `vis/` (white ring = clicked player, green = correct detection, red = false
-detection, yellow X = missed player).
-
-**Results (Game 2):** 10 moments, 105 players, system rows (both cameras), 1.0 m match gate.
-
-| Detector | Foot point | Precision | Recall | F1 | Median position error | Time, both cameras |
+| Detector | Foot point | Precision | Recall | F1 | Median error | Time, both cameras |
 |---|---|---|---|---|---|---|
 | HOG + SVM | raw | 0.03 | 0.02 | 0.02 | 0.62 m | 446 ms |
-| HOG + SVM | corrected (13.6%) | 0.71 | 0.50 | 0.58 | 0.51 m | 446 ms |
+| HOG + SVM | corrected (13.6 %) | 0.71 | 0.50 | 0.58 | 0.51 m | 446 ms |
 | YOLO11n | raw | 0.67 | 0.69 | 0.68 | 0.66 m | 264 ms |
-| **YOLO11n** | **corrected (5.3%)** | **0.94** | **0.91** | **0.93** | **0.25 m** | **264 ms** |
+| **YOLO11n** | **corrected (5.3 %)** | **0.94** | **0.91** | **0.93** | **0.25 m** | **264 ms** |
 | YOLO11s | raw | 0.67 | 0.73 | 0.70 | 0.65 m | 631 ms |
-| YOLO11s | corrected (5.6%) | 0.94 | 0.95 | 0.94 | 0.25 m | 631 ms |
+| YOLO11s | corrected (5.6 %) | 0.94 | 0.95 | 0.94 | 0.25 m | 631 ms |
 
-- The foot correction is the largest single improvement (YOLO11n F1 0.68 to 0.93). The two
-  cross-validation folds gave the same value (5.3% / 5.3%), so it is stable.
-- YOLO11s is only marginally better at 2.4x the cost, so YOLO11n is used.
-- HOG finds about half the players even after correction: its fixed window misses small,
-  distant and crouching players, and its boxes are loose.
-- Remaining misses (5-6 per camera) are mostly players hidden behind others. The position
-  error includes the error of the hand clicks.
-- Limitations: 10 moments from one game, one annotator, single frames (tracking not scored).
-  Times were measured on our development PC.
+- The **foot correction** is the biggest single improvement (F1 0.68 to 0.93): the box bottom is
+  about 10 px below the feet, which at these shallow angles is 0.66-0.84 m on the court. It is
+  fitted with 2-fold cross-validation; both folds gave 5.3 %.
+- YOLO11s is barely better at 2.4x the cost, so YOLO11n is used. HOG misses small, distant and
+  crouching players.
 
-### 9. Ball in 3D from both cameras
+![Evaluation: white ring = clicked player, green = correct, red = false, yellow X = missed](docs/media/players_eval_yolo11n.jpg)
+
+### 8. Ball in 3D from both cameras
 ```
-python scripts/ball_two_cameras.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 10
+python scripts/ball_two_cameras.py data/game2_A.mp4 data/game2_B_sdr.mp4 --calib-a data/annotations/calib_A.json --calib-b data/annotations/calib_B.json --sync data/annotations/sync_game2_A_game2_B_sdr.json --start 30 --duration 120
 ```
-No learned ball detector; the second camera does the filtering.
-- **Each camera** (`ball_detect.py`): three-frame difference (frames compared a fixed *time*
-  apart, so 30 and 60 fps behave the same), opening/closing, then size (the 21 cm ball's
-  possible image size from the 3D camera), shape (up to 5:1 for motion blur, at least 25% fill),
-  ball colour (yellow/blue share, plus a precise colour centre for bounces), person boxes from
-  YOLO every 3rd frame, isolation. Candidates are linked into 2D tracklets (constant velocity,
-  Hungarian, gate in ball radii).
-- **Both cameras**: for every pair of tracklets that overlap in time, camera B is interpolated
-  to each camera A frame time and the pair is triangulated (DLT). A pair is the ball only if
-  the rays meet (< 12 px) on 10+ frames and 80% of the overlap, median speed >= 3 m/s, it fits a
-  fixed-gravity parabola within 3 cm (weighted by ray angle), it is ball-coloured (>= 45%), and
-  the blob size matches a 21 cm ball at the triangulated distance (0.6-2.5x). The script prints
-  how many pairs each rule rejected.
-- **Sub-frame sync**: the audio offset is refined on the accepted pairs (+-0.15 s in 2 ms steps,
-  lowest median reprojection error), then matching is repeated.
-- Rays closer than 3 deg to parallel are flagged `3d weak` (near camera height between the
-  cameras); near the floor the geometry is good.
+- **Each camera** (`ball_detect.py`): three-frame difference (frames a fixed *time* apart, so 30 and
+  60 fps behave the same), morphology, then size (the ball's possible image size from the 3D
+  camera model), shape (up to 5:1 for motion blur), ball colour, person boxes, isolation.
+  Candidates are linked into 2D tracklets.
+- **Both cameras:** every pair of overlapping tracklets is triangulated (camera B interpolated to
+  each camera A frame time). A pair is the ball only if the rays meet (< 12 px) on 10+ frames, it
+  moves (median >= 3 m/s), follows a fixed-gravity parabola within 3 cm, is ball-coloured, and its
+  blob size matches a 21 cm ball at the triangulated distance (0.6-2.5x). The size test is the
+  strongest: two unrelated blobs triangulate to the wrong distance.
+- **Sub-frame sync:** the audio offset is refined on the accepted pairs (2 ms steps).
 
-Outputs in `results/ball/`: `<A>_<B>_ball_from<start>.mp4` (both views, top and side view),
-`.csv` (per camera A frame: 2D positions, x, y, z, reprojection error, ray angle, status),
-`_trajectory.png`, `.json` (run details and refined offset) and `_tracks2d.csv` (per-camera
-2D tracks with colour centres, used for single-camera bounces).
+| Both views with the 3D ball, top and side views | Height over time |
+|---|---|
+| ![Ball in 3D](docs/media/ball_frame.jpg) | ![Trajectory](docs/media/ball_trajectory.jpg) |
 
-**Real footage:** 3D coverage on an 8 s rally went from 15% to 77% of frames with no false
-balls after the time-based frame step, a 3 m/s speed floor, reusing tracklets in different
-pairs, the angle-weighted gravity test and the colour threshold.
-
-### 10. Bounces and in/out calls
+### 9. Bounces and IN / OUT calls
 ```
 python scripts/line_calls.py results/ball/game2_A_game2_B_sdr_ball_from30.json
 ```
-1. Bounce candidates: low points (< 0.45 m) where the ball stops descending, per continuous
-   stretch of 3D track (gaps > 0.2 s split it).
-2. Contact point: ballistic arcs (g fixed) fitted to up to 0.4 s before and after, weighted by
-   sin^2(ray angle); contact is where the ball centre is one radius (0.105 m) above the floor.
-3. Uncertainty from the fit covariance, separately across and along the court, plus 5 cm of
-   calibration error (`--calib-sigma`).
-4. Call (FIVB: lines are in, court measured to their outer edges): IN if the 3 cm contact patch
-   reaches the line (`--contact-radius`), else OUT; "close" when the margin is under 2 sigma.
-5. Bounce seen by one camera only: quadratics fitted to its image path before and after the
-   turn meet at the contact pixel; its ray at z = 0.105 m gives the floor point. If the curves
-   miss by more than 6 px (e.g. uneven frame timing) the call is UNRELIABLE.
+1. Bounce candidates: low points (< 0.45 m) where the ball stops descending.
+2. Contact point: gravity arcs fitted to up to 0.4 s before and after (weighted by ray angle);
+   contact is where the ball centre is one radius (0.105 m) above the floor.
+3. Uncertainty from the fit, separately across and along the court, plus 5 cm of calibration error.
+4. Call (FIVB: lines are in): IN if the 3 cm contact patch reaches the line; "close" under 2 sigma.
+5. A bounce seen by one camera only is located from that camera's ray at ball-radius height.
 
-Outputs in `results/calls/`: `_calls.csv` (one row per bounce), `_calls.png` (court with
-2-sigma circles and a height plot), `_bounce<N>.jpg` (zoomed replay from both cameras).
+| Calls on the court (2-sigma circles) and height plot | Replay at the bounce, both cameras |
+|---|---|
+| ![Line calls](docs/media/line_calls.jpg) | ![Bounce replay](docs/media/bounce_replay.jpg) |
 
-### 11. Synthetic test (exact ground truth)
-Real games have no ground truth for landing spots, so `synthetic_render.py` draws a clip where
-everything is known: two virtual cameras placed like ours (exact calibrations saved), a court,
-twelve moving players, a decoy ball, and a ball flying a toss and three serves (IN 2 m inside,
-OUT 30 cm outside, and IN with the centre 2 cm outside the sideline). Camera B is shifted by
-2.017 s; the pipeline starts from a 2.000 s guess.
+### 10. Touches, who touched the ball, and the rules
+```
+python scripts/touches_rules.py results/ball/game2_A_game2_B_sdr_ball_from30.json --players results/players/game2_A_game2_B_sdr_players_from30.csv
+```
+1. **Contacts:** between touches the ball follows a gravity arc. At every 3D sample, arcs fitted to
+   the 0.3 s before and after are compared; a velocity change over 4 m/s is a contact, placed where
+   the two arcs meet. Across gaps in the track the arcs either side are extended: a smooth join
+   means no contact, a kink places one, no meeting marks a possible unseen contact.
+2. **Who touched it:** the 3D contact point is projected into both cameras at the frames around it.
+   YOLO11m-pose runs on a crop of about 4 x 5 m around it, so distant players are big enough. The
+   toucher is the person whose hands (wrist + 0.35 forearm), forearms or head are within 0.3 m of
+   the ball's surface, **and** whose feet are within 1.8 m of the ball on the court. The second test
+   removes players who only overlap the ball in the image (e.g. across the net). For high balls the
+   player may be jumping, so the feet may be up to 0.6 m above the floor along the camera ray; if
+   that leaves the side of the net ambiguous, the team is guessed and marked `TEAM_GUESSED`.
+3. **Rules (FIVB):** a rally starts at a serve or the first contact after a dead ball, and ends at
+   a bounce or when the ball is unseen for 2 s. Possession changes when the other team touches the
+   ball or the 3D track crosses the net. Blocks don't count as a hit. `FOUR_TOUCHES` and
+   `DOUBLE_CONTACT` (same track ID twice, not after a block) are flagged only when the ball was seen
+   throughout (no gap over 0.5 s), so a hidden touch can't cause a false foul. A bounce IN gives the
+   point to the other side; OUT to the opponents of the last team to touch it.
+
+**Result (Game 2, 30-150 s):** 25 contacts, 9 bounces and 7 rallies. 18 contacts were attributed to
+a player: 13 with a confident team and 5 marked `TEAM_GUESSED` (jumping at the net). 7 had nobody
+within reach, mostly balls high above the net or hidden by players. In the evidence images most
+attributed contacts show the ball at the chosen player's hands or forearms, but this has not been
+scored against hand labels. No fouls occurred, so the 4-touch, double-contact and block logic was
+checked on constructed sequences instead (4 hits, the same player twice, a block followed by 3 hits
+and a touch by the blocker, and a hidden stretch that must not raise a foul); all were correct.
+
+| Every event over time (team + hit number) | Evidence: the crop and skeleton used for each contact |
+|---|---|
+| ![Touches](docs/media/touches.jpg) | ![Touch evidence](docs/media/touch_evidence.jpg) |
+
+### 11. Landing prediction during the flight
+```
+python scripts/landing_predict.py results/ball/game2_A_game2_B_sdr_ball_from30.json
+```
+At every frame of a flight (from the last contact to the bounce), a gravity arc is fitted to the
+3D points seen **so far** and extended to where the ball centre is one radius above the floor. That
+gives the predicted landing time and spot, an uncertainty, and an IN/OUT call with the same rule as
+step 9. Each prediction is scored against the measured contact point after 25, 50 and 75 % of the
+flight.
+
+| Clip | Bounce | Flight | Error after 25 / 50 / 75 % of the flight | Calls |
+|---|---|---|---|---|
+| Synthetic | serve IN, 2 m inside | 0.95 s | 2 / 7 / 6 cm | right throughout |
+| Synthetic | serve OUT, 23 cm out | 0.95 s | 8 / 10 / 9 cm | right throughout |
+| Game 2 | 37.05 s, IN | 0.63 s | 235 / 48 / 66 cm | right throughout |
+| Game 2 | 64.14 s, IN | 1.15 s | - / 241 / 225 cm | right throughout |
+| Game 2 | 80.70 s, IN | 2.72 s | 142 / 142 / 152 cm | right throughout |
+| Game 2 | 99.75 s, IN | 1.02 s | 176 / 43 / 20 cm | right throughout |
+| Game 2 | 130.81 s, OUT | 0.35 s | - / - / 39 cm | right |
+| Game 2 | 149.69 s, IN | 2.27 s | 225 / 216 / 207 cm | right throughout |
+
+"-" = not enough of the flight seen in 3D yet. Of the 9 real bounces, 8 got a prediction (one had
+too few 3D samples), and two short ones (0.25 and 0.55 s) only late.
+
+On real footage, 3D noise (5-13 cm per sample) and gaps make early predictions metres off, and the
+model has no air drag. Every real bounce so far landed well inside the court, so close calls are
+not yet tested.
+
+![Landing prediction error against the share of the flight seen](docs/media/landing.jpg)
+
+### 12. Everything in one command and one video
+```
+python scripts/run_pipeline.py --start 30 --duration 120
+```
+Runs steps 6, 8, 9, 10 and 11, then `render_full.py`, which draws both synced cameras and a court
+map with: court lines; players with track IDs (drawn from their court positions); the ball (2D
+detection, 3D point and floor shadow); every contact labelled with team, hit number and player;
+the predicted path and landing spot during each flight; the measured bounce call; and a top bar
+with the rally, "A hit 2/3", fouls and the point.
+
+![A frame of the combined video](docs/media/full_frame.jpg)
+
+### Utility: click and plot points
+```
+python scripts/pick_points.py data/game2_A.mp4 --time 60 --names ball landing
+```
+Saves clicked pixel coordinates with an annotated image, for hand-labelling ground truth.
+
+---
+
+## Synthetic test with exact ground truth
+
+Real games have no ground truth for the ball, so `synthetic_render.py` renders a clip where
+everything is known: two virtual cameras placed like ours (exact calibrations), a court, twelve
+moving players, a decoy ball, and a ball flying a toss and three serves (IN 2 m inside, OUT 30 cm
+outside, and IN with its centre 2 cm outside the sideline). Camera B is shifted by 2.017 s and the
+pipeline starts from a 2.000 s guess.
 ```
 python scripts/synthetic_render.py
 cd data/synthetic
@@ -391,190 +412,82 @@ python ../../scripts/ball_two_cameras.py A.mp4 B.mp4 --calib-a calib_A.json --ca
 python ../../scripts/line_calls.py results/ball/A_B_ball_from0.3.json
 python ../../scripts/synthetic_score.py results/ball/A_B_ball_from0.3.csv results/calls/A_B_ball_from0.3_calls.csv
 ```
-| Measure | Result |
+
+| Measure | Result (current code) |
 |---|---|
-| Calls | 3 / 3 correct (serve 3 called IN, close) |
-| Contact error across the judged line | 1.2, 6.9, 0.5 cm |
-| 3D ball error | median 1.6 cm, 90th percentile 6.6 cm, 99 of 196 frames, no false points |
-| Sync refinement | 2.016 s vs true 2.017 s (1 ms) |
+| 3D ball | 96 of 196 in-flight frames in 3D, median error 2.6 cm, 90th percentile 5.9 cm, no false points |
+| Sync refinement | 2.018 s against the true 2.017 s (1 ms) |
+| Serve 1, IN (2 m inside) | found, IN, 0.4 cm error across the line |
+| Serve 2, OUT (30 cm out) | found, OUT, 6.6 cm error across the line |
+| Serve 3, IN (centre 2 cm outside the sideline) | **missed**: the ball tracker didn't keep this flight |
+| Landing prediction (serves 1-2) | 2-10 cm error after 25-75 % of the flight, calls right throughout |
 
-Not tested by it: calibration error (cameras are exact), audio sync, motion blur, 60 fps / HDR,
-uneven frame timing. The ball image is `data/annotations/ball_patch.png` (a crop of the real
-ball; a drawn ball is used if it is missing).
+An earlier version of the ball tracker found all three serves (errors 1.2, 6.9 and 0.5 cm); the
+current one misses serve 3, which needs investigating. Not covered by the synthetic test:
+calibration error, audio sync, motion blur, HDR and uneven frame timing.
 
-### 12. Touches, the 3-touch rule and double contacts
-```
-python scripts/touches_rules.py results/ball/game2_A_game2_B_sdr_ball_from30.json --players results/players/game2_A_game2_B_sdr_players_from30.csv
-```
-Adapted from a teammate's single-camera prototype (its `ball_events.py`, `touches.py` and
-`rules.py`), but on the two-camera 3D ball track. `--players` (the
-`players_on_court.py` CSV for the same window) is optional; it gives track IDs, which are needed for
-double contacts.
-1. **Contacts:** a ball in free flight follows a fixed-gravity arc. At each 3D sample, arcs fitted to
-   the 0.3 s before and the 0.3 s after are compared. Their velocity change is about 0 in flight and
-   several m/s at a contact (threshold 4 m/s). The contact time and point are where the two arcs meet.
-   Across a gap in the 3D track, the arcs either side are extrapolated: if they join smoothly there was
-   no contact, if they meet with a kink the contact is placed there, and if they don't meet the gap is
-   marked as a possible unseen contact. Floor bounces (and their IN/OUT call) come from `line_calls.py`.
-   Contacts with the ball centre below 0.2 m are the ball on the floor.
-2. **Who touched it:** the 3D contact point is projected into both cameras at the frames before, at
-   and after the contact. YOLO11m-pose runs on a crop of about 4 x 5 m around it, so far players are
-   seen at a usable size. For each person: the gap from the ball's surface to the hands (wrist + 0.35
-   x forearm), forearms and head, in metres at the ball's distance. People whose feet (ankles, else
-   box bottom) are more than 1.8 m from the ball horizontally are rejected; this removes players
-   behind the ball along the camera ray. The closest person within 0.3 m touched it.
-   Team = side of the net where they stand (A = camera A's half, y > 9).
-3. **Rules (FIVB), per rally:** a rally starts at a serve (first contact with the ball behind an end
-   line) or the first contact after a dead ball, and ends at a floor bounce or when the ball is unseen
-   for 2 s. Possession changes when the other team touches the ball or the 3D track crosses the net.
-   A block (toucher within 1 m of the net, both wrists above the head, ball within 0.3 m of the net
-   top or higher, arriving from the other side) doesn't count as a hit and the blocker may touch
-   again. `FOUR_TOUCHES` = a 4th team hit; `DOUBLE_CONTACT` = the same track ID twice in a row (not
-   after a block). A count is only **certain** if the ball was seen (3D or either camera) with no gap
-   over 0.5 s since the previous contact; otherwise no foul is flagged. A floor bounce IN gives the
-   point to the team on the other side; OUT gives it to the opponents of the last team to touch it.
-
-Outputs in `results/touches/`: `_touches.csv` (one row per contact or bounce), `_touches.png`
-(ball height with every event labelled, plus contact points on the court) and `_evidence.jpg` (the
-crop used for each contact, with the skeleton and the ball).
-
-What changed from the single-camera prototype: contacts are found from 3D velocity changes rather than
-2D pixel kinks; the ball's position at each frame comes from the arcs (known where the 2D detector
-missed it); the toucher has to be within reach in court metres, not just close in the image;
-possession uses real net crossings; YOLO11-pose replaces RTMPose (no extra install).
-
-For contacts at 2 m or higher the toucher may be jumping, and a jumping player's feet map too far
-from the camera (step 7). So their feet are allowed anywhere on the camera ray from the floor up to
-0.6 m. If that leaves the side of the net ambiguous, the team is guessed from where the ball came
-from, flagged `TEAM_GUESSED`, and the count is not trusted.
-
-**Result (Game 2, 30-60 s, 3D on 46% of frames):** 9 contacts and 1 floor bounce found, 7 contacts
-attributed. The first rally reads B serve, A hit 1, A hit 2, an unattributed contact at the net,
-floor IN on A's side, point to B. No fouls in this footage (the rule logic was checked on
-constructed sequences: 4 hits, the same player twice, a block followed by 3 hits and a touch by the
-blocker, and a hidden stretch that must not raise a foul). Not yet measured against hand-labelled
-contacts; contacts during unseen stretches (e.g. the serve at about 48 s) are missed.
-
-### 13. Predicting the landing spot while the ball is in the air
-```
-python scripts/landing_predict.py results/ball/game2_A_game2_B_sdr_ball_from30.json
-```
-Adapted from `landing.py` in the single-camera prototype. With one camera, that needs a 3D gravity fit
-for *when* the ball lands, a pixel extrapolation for *where*, and a focal length tuned from physics.
-With two cameras the 3D position is measured, so one fit gives both.
-1. Flight = 3D samples since the last contact before each floor bounce (step 12), or since the
-   track's last gap if no contact was seen.
-2. At every sample during the flight, a fixed-gravity arc is fitted to the samples seen **so far**.
-   Where it comes down to z = ball radius is the predicted landing time and spot, with an
-   uncertainty from the fit (plus 5 cm calibration error).
-3. The predicted spot is called IN/OUT with the same rule as step 10.
-4. Scored against the measured contact point after 25 / 50 / 75 % of the flight time.
-
-Outputs in `results/landing/`: `_landing.csv` (per bounce: error and call at 25/50/75 %),
-`_landing_pred.csv` (every prediction, with the arc, for the video) and `_landing.png` (error
-against the share of the flight seen).
-
-| Clip | Bounce | Flight | Error after 25 % / 50 % / 75 % | Call |
-|---|---|---|---|---|
-| Synthetic | serve IN | 0.95 s | 2 / 7 / 6 cm | right at every stage |
-| Synthetic | serve OUT (23 cm out) | 0.95 s | 8 / 10 / 9 cm | right at every stage |
-| Game 2, 30-60 s | 37.05 s, IN | 0.63 s | 235 / 48 / 66 cm | right at every stage |
-| Game 2, 130-160 s | 150.58 s, IN | 1.04 s | 121 / 79 / 45 cm | right at every stage |
-| Game 2, 130-160 s | 149.69 s, IN | 2.27 s | 226 / 217 / 208 cm | right at every stage |
-
-On real footage the 3D noise (5-13 cm per sample) and gaps make early predictions metres off.
-The model has no air drag, so long flights land shorter than predicted. Every call was still
-right, but all of these landed well inside the court, so close calls are untested.
-
-### 14. Everything in one command and one video
-```
-python scripts/run_pipeline.py --start 30 --duration 30
-```
-Runs players (step 7), ball 3D (9), line calls (10), touches and rules (12), landing prediction (13),
-then `render_full.py`. Each step is skipped if its output exists; `--redo touches` re-runs from that
-step on, and `--redo all` re-runs everything. Game 2 files are the defaults; other footage uses
-`--video-a/--video-b/--calib-a/--calib-b/--sync` (calibrate and sync first, steps 2-5).
-
-`results/full/<A>_<B>_full_from<start>.mp4` shows both synced cameras and a court map:
-- court lines and players with track IDs (orange = camera A's half, green = B's, drawn from their
-  court positions)
-- the ball (2D detection, 3D point and its floor shadow)
-- each contact with team, hit number and player ("A2 #5")
-- the predicted path and landing spot ("pred IN") while the ball is in the air
-- the measured bounce call
-- a top bar with the rally, "A hit 2/3", fouls, and the point after a bounce
-
-On 30-60 s with players and ball already done: about 2.5 min (touches 87 s, render 56 s).
-
-### Utility: click and plot points
-```
-python scripts/pick_points.py data/game2_A.mp4 --time 60 --names ball landing
-python scripts/pick_points.py frames/game2_A/t0120.00.png --show results/points/game2_A_t60.json
-```
-Saves pixel coordinates to `results/points/<name>.json` with an annotated image, or redraws
-saved points on another frame. Use it to hand-label ball landing spots as ground truth.
+![Synthetic OUT serve: replay at the bounce](docs/media/synthetic_bounce_out.jpg)
 
 ---
 
 ## Earlier work: court detection on broadcast footage
 
-Development footage: a broadcast match (USA vs Brazil) filmed from behind one end line. The
-camera holds still during rallies but zooms and reframes between rallies.
+Before recording our own footage, the system was developed on a broadcast match (USA vs Brazil)
+filmed from behind one end line. White lines on that light floor are nearly invisible (brightness
+245 vs 241), so `court_detect.py` uses the colour boundary between the court and the blue free zone:
+a free-zone colour model, boundary scanning, vectorised RANSAC line fits for the four edges,
+corners from intersections, and a homography to the 9 x 18 m court. The centre and attack lines,
+never used in the fit, serve as an independent check.
 
-White lines on that light floor are nearly invisible (brightness 245 vs 241), so
-`court_detect.py` uses the colour boundary between the court and the blue free zone:
-1. A free-zone colour model, sampled at the bottom of the frame.
-2. Boundary scanning along rows and columns.
-3. Vectorised RANSAC line fits for the four edges.
-4. Corners from line intersections, then a homography to the 9 x 18 m court.
-5. The centre and attack lines, never used in the fit, as an independent check.
-
-**Results:** 213 frames across a full match; 15 randomly chosen frames hand-labelled across
-different zoom levels.
-
-| Points | Median error | Mean error |
+| Points (15 hand-labelled frames across zoom levels) | Median error | Mean error |
 |---|---|---|
 | All 6 points | 5.8 cm | 5.8 cm |
 | Corners (used by the detector) | 4.7 cm | 6.0 cm |
 | Attack-line points (never used by the detector) | 4.9 cm | 5.4 cm |
 
-It runs at about 11–15 ms per frame at 960 px width.
+It runs at 11-15 ms per frame at 960 px (`court_live.py` runs it live with smoothing). It needs a
+free zone of a different colour from the court, which is why Game 2 uses line detection instead.
 
-**Limitations:** tested at one venue only, and it needs a free zone of a different colour
-from the court, which is why Game 2 uses line detection instead.
-
-| Script | Purpose |
-|---|---|
-| `court_detect.py` | Free-zone boundary detector, one image: `python scripts/court_detect.py <image> [--gt clicks.npy]` |
-| `court_live.py` | Live court detection on a video or camera, with smoothing and HOLD / NO COURT states |
-| `annotate_court.py` | Hand-click 6 ground-truth points on random frames |
-| `court_batch_eval.py` | Run the detector on a folder of frames and measure the error against ground truth |
-| `manual_homography.py` | Four-click homography with an overlay check |
-| `court_lines.py` | First attempt (white-line mask, Canny, Hough); fails on light courts, kept as a baseline |
-
-`annotate_court.py` and `court_batch_eval.py` expect frames named `frame_XXXXXX.jpg`, from
-the earlier version of `inspect_video.py`. The current version names frames `tSSSS.SS.png`.
+![Broadcast court detection, worst frames](docs/media/broadcast_court.jpg)
 
 ---
 
-## Working on the repo
+## Limitations and next steps
 
-- **Never commit directly to `main`.** Make a branch per task:
-  ```
-  git checkout main
-  git pull
-  git checkout -b my-feature
-  ```
-- Push your branch, open a pull request on GitHub, and merge when it works.
-- Before committing, run `git status` and make sure no videos, frames or results are listed.
+- **Touch detection isn't scored against hand labels yet.** Next: label contacts (time and player)
+  on a few rallies with `pick_points.py`.
+- **No fouls occurred in the footage**, so the 4-touch, double-contact and block logic is only
+  checked on constructed sequences.
+- **Close line calls are untested on real footage:** every real bounce landed well inside the court.
+- **3D coverage** drops when the ball is near camera height between the cameras (the rays are
+  nearly parallel) and when it is hidden by players. Mounting the phones higher, or adding a third
+  phone at the side, would help.
+- **Synthetic serve 3** (the close one) is missed by the current ball tracker.
+- Record at 60 fps with Auto FPS off (camera A's uneven frame timing made one real bounce
+  unreliable), add air drag to the landing prediction, and compare the ball detector with
+  TrackNetV3.
 
-## Next steps
+---
 
-1. Record both phones at 60 fps with Auto FPS off (camera A's uneven frame timing made a real
-   corner bounce UNRELIABLE).
-2. Mount the cameras higher, or add a third phone at the side, for high balls and depth near the net.
-3. Hand-label real landing spots with `pick_points.py` to measure in/out accuracy on real rallies.
-4. Refit both calibrations with the line-centre convention (`calibrate_camera.py --points-json`).
-5. Compare the ball detector with TrackNetV3 on the same clips.
-6. Hand-label contacts (time and player) on a few rallies to score `touches_rules.py`.
-7. Add air drag to the landing prediction, and test it on bounces near the lines.
+## Repository layout
+
+| Script | Step | Purpose |
+|---|---|---|
+| `inspect_video.py` | 1 | Video properties, dropped frames, HDR check, frame export |
+| `hdr_to_sdr.py` | 2 | iPhone HDR (HLG) to normal video |
+| `detect_court_lines.py` | 3 | Automatic yellow court-line detection |
+| `calibrate_camera.py`, `camera_3d.py` | 4 | Court calibration, accuracy, tripod check; 3D camera models |
+| `sync_videos.py` | 5 | Audio sync between the cameras |
+| `players_on_court.py` | 6 | Player detection, court positions, tracking |
+| `eval_players.py` | 7 | Player detection accuracy against hand clicks |
+| `ball_detect.py`, `ball_two_cameras.py` | 8 | Ball candidates in each camera; 3D ball |
+| `line_calls.py` | 9 | Bounces and IN / OUT calls |
+| `touches_rules.py` | 10 | Contacts, who touched the ball, 3-touch and double-contact rules |
+| `landing_predict.py` | 11 | Landing prediction during the flight |
+| `run_pipeline.py`, `render_full.py` | 12 | Everything in one command and one video |
+| `synthetic_render.py`, `synthetic_score.py` | test | Synthetic clip with exact ground truth, and its scoring |
+| `pick_points.py` | utility | Click and plot points (hand labels) |
+| `court_detect.py`, `court_live.py`, `annotate_court.py`, `court_batch_eval.py`, `manual_homography.py`, `court_lines.py` | earlier work | Court detection on broadcast footage |
+
+The contact detection, rules and landing prediction were adapted to the two-camera 3D track from
+a teammate's single-camera prototype (ball events, touch attribution, rally rules, landing).

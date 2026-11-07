@@ -253,3 +253,9 @@ results/
 .DS_Store
 Thumbs.db
 desktop.ini
+# README figures and demo video (small, committed on purpose)
+!docs/media/
+!docs/media/*.mp4
+
+# Figures exported for the Overleaf report (not part of the code submission)
+report_figures/

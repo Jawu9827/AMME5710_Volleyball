@@ -7,7 +7,8 @@ Reports
     3D ball   frames tracked in 3D / frames with a ball in flight, false 3D points (more than 0.5 m
               from the true ball), median and 90th-percentile 3D error
     sync      refined offset (from the run's .json) against the true 2.017 s
-    calls     each true landing matched to the nearest detected bounce: estimated contact point,
+    calls     each true landing matched to the nearest detected bounce within MATCH_M (else
+              MISSED): estimated contact point,
               error across the judged line, and whether the call is correct
 """
 import csv
@@ -19,6 +20,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 from synthetic_render import OFF_TRUE, TRUE_LANDINGS, ball  # noqa: E402
+
+MATCH_M = 0.5    # a detected bounce further than this from a true landing is not that landing
 
 
 def score_3d(path):
@@ -53,6 +56,10 @@ def score_calls(path):
     for i, ((x, y), true_call) in enumerate(TRUE_LANDINGS, 1):
         r = min(rows, key=lambda q: np.hypot(float(q["x_m"]) - x, float(q["y_m"]) - y))
         ex, ey = float(r["x_m"]), float(r["y_m"])
+        if np.hypot(ex - x, ey - y) > MATCH_M:          # nearest bounce is another serve's
+            print(f"  serve {i}: true ({x:.2f}, {y:.2f}) {true_call:3s} | no bounce found within "
+                  f"{100 * MATCH_M:.0f} cm | MISSED")
+            continue
         across = abs(ex - x) if "sideline" in r["nearest_line"] else abs(ey - y)
         ok = r["call"] == true_call
         correct += ok
